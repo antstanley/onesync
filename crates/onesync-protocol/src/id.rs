@@ -20,13 +20,13 @@ pub trait IdPrefix {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id<T: IdPrefix> {
     ulid: Ulid,
-    _marker: PhantomData<fn() -> T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T: IdPrefix> Id<T> {
     /// Construct an [`Id`] directly from a [`Ulid`] without parsing.
     #[must_use]
-    pub fn from_ulid(ulid: Ulid) -> Self {
+    pub const fn from_ulid(ulid: Ulid) -> Self {
         Self {
             ulid,
             _marker: PhantomData,
@@ -67,12 +67,8 @@ pub enum IdParseError {
         expected: &'static str,
     },
     /// The 26-character body after the `_` is not a valid ULID.
-    #[error("malformed ULID body: {source}")]
-    MalformedUlid {
-        /// The underlying decode error from the `ulid` crate.
-        #[source]
-        source: ulid::DecodeError,
-    },
+    #[error("malformed ULID body: {0}")]
+    MalformedUlid(String),
 }
 
 impl<T: IdPrefix> FromStr for Id<T> {
@@ -88,7 +84,7 @@ impl<T: IdPrefix> FromStr for Id<T> {
         }
         let ulid = body
             .parse::<Ulid>()
-            .map_err(|source| IdParseError::MalformedUlid { source })?;
+            .map_err(|source| IdParseError::MalformedUlid(source.to_string()))?;
         Ok(Self::from_ulid(ulid))
     }
 }
@@ -136,6 +132,13 @@ mod tests {
     fn it_rejects_an_id_with_a_malformed_ulid_body() {
         let bad = "pair_NOTAULID0000000000000000ZZ";
         let err = bad.parse::<Id<TestTag>>().expect_err("rejects");
-        assert!(matches!(err, IdParseError::MalformedUlid { .. }));
+        assert!(matches!(err, IdParseError::MalformedUlid(_)));
+    }
+
+    #[test]
+    fn it_rejects_an_id_with_no_separator() {
+        let bad = "pair01J8X7CFGMZG7Y4DC0VA8DZW2H";
+        let err = bad.parse::<Id<TestTag>>().expect_err("rejects");
+        assert!(matches!(err, IdParseError::MissingSeparator));
     }
 }
