@@ -15,6 +15,7 @@ pub mod errors;
 pub mod file_entry;
 pub mod file_op;
 pub mod file_side;
+pub mod handles;
 pub mod id;
 pub mod pair;
 pub mod path;
