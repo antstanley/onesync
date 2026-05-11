@@ -1,0 +1,21 @@
+[package]
+name = "onesync-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+ulid          = { workspace = true }
+chrono        = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[dev-dependencies]
+jsonschema    = { workspace = true }
+proptest      = { workspace = true }
