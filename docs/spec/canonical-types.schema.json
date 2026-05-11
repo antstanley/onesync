@@ -1,0 +1,423 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onesync.dev/schemas/canonical-types.schema.json",
+  "title": "onesync canonical types",
+  "description": "Authoritative shapes for onesync's domain entities, port DTOs, and IPC payloads. The shapes here are the contract between core, adapters, and the JSON-RPC protocol. Implementation types in Rust must serialise into these shapes verbatim.",
+
+  "$defs": {
+
+    "Id": {
+      "type": "string",
+      "description": "A typed identifier of the form '<prefix>_<crockford-base32-ulid>'. Prefix is 2-4 lowercase ASCII letters; the ULID body is 26 Crockford Base32 characters.",
+      "pattern": "^[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+
+    "PairId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "pattern": "^pair_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "AccountId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "pattern": "^acct_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "ConflictId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "pattern": "^cfl_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "SyncRunId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "FileOpId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "pattern": "^op_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "AuditEventId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "pattern": "^aud_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp with seconds precision or finer."
+    },
+
+    "RelPath": {
+      "type": "string",
+      "description": "POSIX path relative to a pair root, NFC-normalised, no leading slash, no '..', no embedded NUL.",
+      "pattern": "^(?!.*\\.\\.)(?!/)[^\\u0000]+$",
+      "maxLength": 1024
+    },
+
+    "AbsPath": {
+      "type": "string",
+      "description": "Absolute filesystem path on the host. UTF-8.",
+      "pattern": "^/[^\\u0000]*$"
+    },
+
+    "ContentHash": {
+      "type": "string",
+      "description": "BLAKE3 digest, 64 hex characters.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+
+    "ETag": {
+      "type": "string",
+      "description": "OneDrive ETag or cTag value, opaque."
+    },
+
+    "DriveItemId": {
+      "type": "string",
+      "description": "OneDrive driveItem id, opaque."
+    },
+
+    "DriveId": {
+      "type": "string",
+      "description": "OneDrive drive id, opaque."
+    },
+
+    "DeltaCursor": {
+      "type": "string",
+      "description": "Opaque cursor token returned by Microsoft Graph /delta."
+    },
+
+    "FileKind": {
+      "type": "string",
+      "enum": ["file", "directory"]
+    },
+
+    "AccountKind": {
+      "type": "string",
+      "enum": ["personal", "business"]
+    },
+
+    "PairStatus": {
+      "type": "string",
+      "enum": ["initializing", "active", "paused", "errored", "removed"]
+    },
+
+    "FileSyncState": {
+      "type": "string",
+      "enum": [
+        "clean",
+        "dirty",
+        "pending_upload",
+        "pending_download",
+        "pending_conflict",
+        "in_flight"
+      ]
+    },
+
+    "FileOpKind": {
+      "type": "string",
+      "enum": [
+        "upload",
+        "download",
+        "local_delete",
+        "remote_delete",
+        "local_mkdir",
+        "remote_mkdir",
+        "local_rename",
+        "remote_rename"
+      ]
+    },
+
+    "FileOpStatus": {
+      "type": "string",
+      "enum": ["enqueued", "in_progress", "backoff", "success", "failed"]
+    },
+
+    "RunTrigger": {
+      "type": "string",
+      "enum": ["scheduled", "local_event", "remote_webhook", "cli_force", "backoff_retry"]
+    },
+
+    "RunOutcome": {
+      "type": "string",
+      "enum": ["success", "partial_failure", "aborted"]
+    },
+
+    "ConflictSide": {
+      "type": "string",
+      "enum": ["local", "remote"]
+    },
+
+    "ConflictResolution": {
+      "type": "string",
+      "enum": ["auto", "manual"]
+    },
+
+    "AuditLevel": {
+      "type": "string",
+      "enum": ["info", "warn", "error"]
+    },
+
+    "LogLevel": {
+      "type": "string",
+      "enum": ["info", "debug", "trace"]
+    },
+
+    "FileSide": {
+      "type": "object",
+      "description": "A snapshot of one side's view of a file at a point in time.",
+      "properties": {
+        "kind":         { "$ref": "#/$defs/FileKind" },
+        "size_bytes":   { "type": "integer", "minimum": 0 },
+        "content_hash": { "anyOf": [{ "$ref": "#/$defs/ContentHash" }, { "type": "null" }] },
+        "mtime":        { "$ref": "#/$defs/Timestamp" },
+        "etag":         { "anyOf": [{ "$ref": "#/$defs/ETag" }, { "type": "null" }] },
+        "remote_item_id": { "anyOf": [{ "$ref": "#/$defs/DriveItemId" }, { "type": "null" }] }
+      },
+      "required": ["kind", "size_bytes", "mtime"],
+      "additionalProperties": false
+    },
+
+    "Account": {
+      "type": "object",
+      "properties": {
+        "id":            { "$ref": "#/$defs/AccountId" },
+        "kind":          { "$ref": "#/$defs/AccountKind" },
+        "upn":           { "type": "string", "format": "email" },
+        "tenant_id":     { "type": "string" },
+        "drive_id":      { "$ref": "#/$defs/DriveId" },
+        "display_name":  { "type": "string", "minLength": 1 },
+        "keychain_ref":  { "type": "string", "minLength": 1 },
+        "scopes":        { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "created_at":    { "$ref": "#/$defs/Timestamp" },
+        "updated_at":    { "$ref": "#/$defs/Timestamp" }
+      },
+      "required": [
+        "id", "kind", "upn", "tenant_id", "drive_id",
+        "display_name", "keychain_ref", "scopes",
+        "created_at", "updated_at"
+      ],
+      "additionalProperties": false
+    },
+
+    "Pair": {
+      "type": "object",
+      "properties": {
+        "id":             { "$ref": "#/$defs/PairId" },
+        "account_id":     { "$ref": "#/$defs/AccountId" },
+        "local_path":     { "$ref": "#/$defs/AbsPath" },
+        "remote_item_id": { "$ref": "#/$defs/DriveItemId" },
+        "remote_path":    { "type": "string" },
+        "display_name":   { "type": "string", "minLength": 1 },
+        "status":         { "$ref": "#/$defs/PairStatus" },
+        "paused":         { "type": "boolean" },
+        "delta_token":    { "anyOf": [{ "$ref": "#/$defs/DeltaCursor" }, { "type": "null" }] },
+        "errored_reason": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "created_at":     { "$ref": "#/$defs/Timestamp" },
+        "updated_at":     { "$ref": "#/$defs/Timestamp" },
+        "last_sync_at":   { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "conflict_count": { "type": "integer", "minimum": 0 }
+      },
+      "required": [
+        "id", "account_id", "local_path", "remote_item_id", "remote_path",
+        "display_name", "status", "paused",
+        "created_at", "updated_at", "conflict_count"
+      ],
+      "additionalProperties": false
+    },
+
+    "FileEntry": {
+      "type": "object",
+      "properties": {
+        "pair_id":       { "$ref": "#/$defs/PairId" },
+        "relative_path": { "$ref": "#/$defs/RelPath" },
+        "kind":          { "$ref": "#/$defs/FileKind" },
+        "sync_state":    { "$ref": "#/$defs/FileSyncState" },
+        "local":         { "anyOf": [{ "$ref": "#/$defs/FileSide" }, { "type": "null" }] },
+        "remote":        { "anyOf": [{ "$ref": "#/$defs/FileSide" }, { "type": "null" }] },
+        "synced":        { "anyOf": [{ "$ref": "#/$defs/FileSide" }, { "type": "null" }] },
+        "pending_op_id": { "anyOf": [{ "$ref": "#/$defs/FileOpId" }, { "type": "null" }] },
+        "updated_at":    { "$ref": "#/$defs/Timestamp" }
+      },
+      "required": [
+        "pair_id", "relative_path", "kind", "sync_state", "updated_at"
+      ],
+      "additionalProperties": false
+    },
+
+    "FileOp": {
+      "type": "object",
+      "properties": {
+        "id":            { "$ref": "#/$defs/FileOpId" },
+        "run_id":        { "$ref": "#/$defs/SyncRunId" },
+        "pair_id":       { "$ref": "#/$defs/PairId" },
+        "relative_path": { "$ref": "#/$defs/RelPath" },
+        "kind":          { "$ref": "#/$defs/FileOpKind" },
+        "status":        { "$ref": "#/$defs/FileOpStatus" },
+        "attempts":      { "type": "integer", "minimum": 0 },
+        "last_error":    { "anyOf": [{ "$ref": "#/$defs/ErrorEnvelope" }, { "type": "null" }] },
+        "metadata":      { "type": "object", "additionalProperties": true },
+        "enqueued_at":   { "$ref": "#/$defs/Timestamp" },
+        "started_at":    { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "finished_at":   { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
+      },
+      "required": [
+        "id", "run_id", "pair_id", "relative_path",
+        "kind", "status", "attempts", "enqueued_at"
+      ],
+      "additionalProperties": false
+    },
+
+    "Conflict": {
+      "type": "object",
+      "properties": {
+        "id":                  { "$ref": "#/$defs/ConflictId" },
+        "pair_id":             { "$ref": "#/$defs/PairId" },
+        "relative_path":       { "$ref": "#/$defs/RelPath" },
+        "winner":              { "$ref": "#/$defs/ConflictSide" },
+        "loser_relative_path": { "$ref": "#/$defs/RelPath" },
+        "local_side":          { "$ref": "#/$defs/FileSide" },
+        "remote_side":         { "$ref": "#/$defs/FileSide" },
+        "detected_at":         { "$ref": "#/$defs/Timestamp" },
+        "resolved_at":         { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "resolution":          { "anyOf": [{ "$ref": "#/$defs/ConflictResolution" }, { "type": "null" }] },
+        "note":                { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+      },
+      "required": [
+        "id", "pair_id", "relative_path", "winner",
+        "loser_relative_path", "local_side", "remote_side", "detected_at"
+      ],
+      "additionalProperties": false
+    },
+
+    "SyncRun": {
+      "type": "object",
+      "properties": {
+        "id":               { "$ref": "#/$defs/SyncRunId" },
+        "pair_id":          { "$ref": "#/$defs/PairId" },
+        "trigger":          { "$ref": "#/$defs/RunTrigger" },
+        "started_at":       { "$ref": "#/$defs/Timestamp" },
+        "finished_at":      { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "local_ops":        { "type": "integer", "minimum": 0 },
+        "remote_ops":       { "type": "integer", "minimum": 0 },
+        "bytes_uploaded":   { "type": "integer", "minimum": 0 },
+        "bytes_downloaded": { "type": "integer", "minimum": 0 },
+        "outcome":          { "anyOf": [{ "$ref": "#/$defs/RunOutcome" }, { "type": "null" }] },
+        "outcome_detail":   { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+      },
+      "required": [
+        "id", "pair_id", "trigger", "started_at",
+        "local_ops", "remote_ops", "bytes_uploaded", "bytes_downloaded"
+      ],
+      "additionalProperties": false
+    },
+
+    "AuditEvent": {
+      "type": "object",
+      "properties": {
+        "id":      { "$ref": "#/$defs/AuditEventId" },
+        "ts":      { "$ref": "#/$defs/Timestamp" },
+        "level":   { "$ref": "#/$defs/AuditLevel" },
+        "kind":    { "type": "string", "minLength": 1 },
+        "pair_id": { "anyOf": [{ "$ref": "#/$defs/PairId" }, { "type": "null" }] },
+        "payload": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["id", "ts", "level", "kind", "payload"],
+      "additionalProperties": false
+    },
+
+    "InstanceConfig": {
+      "type": "object",
+      "properties": {
+        "log_level":     { "$ref": "#/$defs/LogLevel" },
+        "notify":        { "type": "boolean" },
+        "allow_metered": { "type": "boolean" },
+        "min_free_gib":  { "type": "integer", "minimum": 0 },
+        "updated_at":    { "$ref": "#/$defs/Timestamp" }
+      },
+      "required": ["log_level", "notify", "allow_metered", "min_free_gib", "updated_at"],
+      "additionalProperties": false
+    },
+
+    "ErrorEnvelope": {
+      "type": "object",
+      "description": "Structured error returned by ports, persisted on failed ops, and serialised across the IPC. The 'kind' is the stable machine identifier; 'message' is human-readable.",
+      "properties": {
+        "kind":       { "type": "string", "minLength": 1 },
+        "message":    { "type": "string", "minLength": 1 },
+        "retryable":  { "type": "boolean" },
+        "request_id": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "context":    { "type": "object", "additionalProperties": true }
+      },
+      "required": ["kind", "message", "retryable"],
+      "additionalProperties": false
+    },
+
+    "RpcError": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 error object as emitted by onesyncd.",
+      "properties": {
+        "code":    { "type": "integer" },
+        "message": { "type": "string", "minLength": 1 },
+        "data":    { "$ref": "#/$defs/ErrorEnvelope" }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+
+    "SyncRunHandle": {
+      "type": "object",
+      "properties": {
+        "run_id":          { "$ref": "#/$defs/SyncRunId" },
+        "subscription_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["run_id", "subscription_id"],
+      "additionalProperties": false
+    },
+
+    "PairStatusDetail": {
+      "type": "object",
+      "properties": {
+        "pair":            { "$ref": "#/$defs/Pair" },
+        "in_flight_ops":   { "type": "array", "items": { "$ref": "#/$defs/FileOp" } },
+        "recent_runs":     { "type": "array", "items": { "$ref": "#/$defs/SyncRun" } },
+        "conflict_count":  { "type": "integer", "minimum": 0 },
+        "queue_depth":     { "type": "integer", "minimum": 0 }
+      },
+      "required": ["pair", "in_flight_ops", "recent_runs", "conflict_count", "queue_depth"],
+      "additionalProperties": false
+    },
+
+    "SyncRunDetail": {
+      "type": "object",
+      "description": "Returned by the run.get RPC; combines a SyncRun with the FileOps it enqueued.",
+      "properties": {
+        "run":        { "$ref": "#/$defs/SyncRun" },
+        "ops":        { "type": "array", "items": { "$ref": "#/$defs/FileOp" } },
+        "conflicts":  { "type": "array", "items": { "$ref": "#/$defs/Conflict" } }
+      },
+      "required": ["run", "ops", "conflicts"],
+      "additionalProperties": false
+    },
+
+    "SubscriptionAck": {
+      "type": "object",
+      "description": "Returned when opening a subscription RPC (audit.tail, pair.subscribe, conflict.subscribe).",
+      "properties": {
+        "subscription_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["subscription_id"],
+      "additionalProperties": false
+    },
+
+    "Diagnostics": {
+      "type": "object",
+      "properties": {
+        "version":         { "type": "string", "minLength": 1 },
+        "schema_version":  { "type": "integer", "minimum": 1 },
+        "uptime_s":        { "type": "integer", "minimum": 0 },
+        "pairs":           { "type": "array", "items": { "$ref": "#/$defs/PairStatusDetail" } },
+        "accounts":        { "type": "array", "items": { "$ref": "#/$defs/Account" } },
+        "config":          { "$ref": "#/$defs/InstanceConfig" },
+        "subscriptions":   { "type": "integer", "minimum": 0 }
+      },
+      "required": ["version", "schema_version", "uptime_s", "pairs", "accounts", "config", "subscriptions"],
+      "additionalProperties": false
+    }
+  }
+}

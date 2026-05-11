@@ -1,0 +1,10 @@
+target/
+.private/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.jsonl
+coverage/
+.idea/
+.DS_Store
