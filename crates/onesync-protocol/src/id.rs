@@ -102,6 +102,56 @@ impl<'de, T: IdPrefix> Deserialize<'de> for Id<T> {
     }
 }
 
+macro_rules! id_tag {
+    ($(#[$tag_meta:meta])* $tag:ident, $prefix:expr, $(#[$alias_meta:meta])* $alias:ident) => {
+        $(#[$tag_meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $tag;
+        impl IdPrefix for $tag {
+            const PREFIX: &'static str = $prefix;
+        }
+        $(#[$alias_meta])*
+        pub type $alias = Id<$tag>;
+    };
+}
+
+id_tag!(
+    /// Tag type for [`PairId`].
+    PairTag, "pair",
+    /// Typed identifier for a sync pair.
+    PairId
+);
+id_tag!(
+    /// Tag type for [`AccountId`].
+    AccountTag, "acct",
+    /// Typed identifier for an account.
+    AccountId
+);
+id_tag!(
+    /// Tag type for [`ConflictId`].
+    ConflictTag, "cfl",
+    /// Typed identifier for a conflict record.
+    ConflictId
+);
+id_tag!(
+    /// Tag type for [`SyncRunId`].
+    SyncRunTag, "run",
+    /// Typed identifier for a sync run.
+    SyncRunId
+);
+id_tag!(
+    /// Tag type for [`FileOpId`].
+    FileOpTag, "op",
+    /// Typed identifier for a file operation.
+    FileOpId
+);
+id_tag!(
+    /// Tag type for [`AuditEventId`].
+    AuditTag, "aud",
+    /// Typed identifier for an audit-log event.
+    AuditEventId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
