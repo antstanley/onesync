@@ -14,8 +14,8 @@ use onesync_protocol::*;
 const SCHEMA_PATH: &str = "../../docs/spec/canonical-types.schema.json";
 
 fn schema() -> JSONSchema {
-    let raw = std::fs::read_to_string(SCHEMA_PATH)
-        .unwrap_or_else(|e| panic!("read {SCHEMA_PATH}: {e}"));
+    let raw =
+        std::fs::read_to_string(SCHEMA_PATH).unwrap_or_else(|e| panic!("read {SCHEMA_PATH}: {e}"));
     let value: serde_json::Value = serde_json::from_str(&raw).expect("schema parses");
     JSONSchema::options()
         .with_draft(jsonschema::Draft::Draft202012)
@@ -28,9 +28,8 @@ fn validate_against(_schema: &JSONSchema, sub_def: &str, instance: &serde_json::
     let wrapper: serde_json::Value = serde_json::json!({
         "$ref": format!("#/$defs/{sub_def}")
     });
-    let base: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(SCHEMA_PATH).unwrap()
-    ).unwrap();
+    let base: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(SCHEMA_PATH).unwrap()).unwrap();
     let mut combined = base.clone();
     combined["$ref"] = wrapper["$ref"].clone();
     let compiled = JSONSchema::options()
@@ -40,7 +39,10 @@ fn validate_against(_schema: &JSONSchema, sub_def: &str, instance: &serde_json::
     let result = compiled.validate(instance);
     if let Err(errors) = result {
         let messages: Vec<_> = errors.map(|e| format!("- {e}")).collect();
-        panic!("{sub_def} failed schema validation:\n{}", messages.join("\n"));
+        panic!(
+            "{sub_def} failed schema validation:\n{}",
+            messages.join("\n")
+        );
     }
 }
 
