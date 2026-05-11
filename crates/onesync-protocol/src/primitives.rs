@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// ISO-8601 UTC timestamp with seconds precision or finer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Timestamp(pub DateTime<Utc>);
+pub struct Timestamp(DateTime<Utc>);
 
 impl Timestamp {
     /// Wrap a [`DateTime<Utc>`] in a [`Timestamp`].
@@ -119,7 +119,7 @@ macro_rules! opaque_string {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        pub struct $name(pub String);
+        pub struct $name(String);
 
         impl $name {
             /// Construct from any value that converts into a [`String`].
