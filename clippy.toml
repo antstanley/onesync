@@ -1,0 +1,6 @@
+avoid-breaking-exported-api = false
+disallowed-methods = [
+  { path = "std::env::var", reason = "Use InstanceConfig; env reads belong in onesync-daemon startup only." },
+  { path = "chrono::Utc::now", reason = "Use the Clock port." },
+  { path = "ulid::Ulid::new", reason = "Use the IdGenerator port." },
+]
