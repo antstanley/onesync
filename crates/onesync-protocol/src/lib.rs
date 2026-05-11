@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod enums;
+pub mod file_side;
 pub mod id;
 pub mod path;
 pub mod primitives;
