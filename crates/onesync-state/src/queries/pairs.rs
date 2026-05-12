@@ -180,7 +180,11 @@ mod tests {
 
     fn fresh_db() -> (TempDir, crate::connection::ConnectionPool) {
         let tmp = TempDir::new().expect("tmpdir");
-        let pool = open(&tmp.path().join("t.sqlite")).expect("open");
+        let pool = open(
+            &tmp.path().join("t.sqlite"),
+            &crate::queries::test_timestamp(),
+        )
+        .expect("open");
         (tmp, pool)
     }
 

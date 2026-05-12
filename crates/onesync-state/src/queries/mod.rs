@@ -5,6 +5,7 @@
 
 pub mod accounts;
 pub mod audit;
+pub mod config;
 pub mod conflicts;
 pub mod file_entries;
 pub mod file_ops;
@@ -20,4 +21,13 @@ pub(crate) fn parse_timestamp(
     Ok(onesync_protocol::primitives::Timestamp::from_datetime(
         dt.with_timezone(&chrono::Utc),
     ))
+}
+
+/// A fixed `Timestamp` used as the bootstrap timestamp in all unit tests.
+#[cfg(test)]
+pub(crate) fn test_timestamp() -> onesync_protocol::primitives::Timestamp {
+    use chrono::TimeZone;
+    onesync_protocol::primitives::Timestamp::from_datetime(
+        chrono::Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap(),
+    )
 }
