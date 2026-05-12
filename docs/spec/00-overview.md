@@ -1,6 +1,6 @@
 # onesync — Design Overview
 
-**Status:** Draft · **Date:** 2026-05-11 · **Owner:** Stan · **Scope:** Repo-wide
+**Status:** Draft · **Date:** 2026-05-12 · **Owner:** Stan · **Scope:** Repo-wide
 
 onesync is a macOS background service that performs two-way synchronisation between a designated
 local folder and a designated folder in OneDrive. A user-facing CLI manages the service, pairs,
@@ -188,6 +188,6 @@ does that one job well.
 
 **Open questions**
 
-- *Soak-test data for raising the file-size cap.* The 10 GiB cap is intentionally conservative.
-  Lifting it to 50 GiB or beyond is gated on real data from hashing throughput and resumable
-  upload behaviour on representative networks.
+- *When should the file-size cap be raised above 10 GiB?* The 10 GiB cap is intentionally
+  conservative. Lifting it to 50 GiB or beyond is gated on real data from hashing throughput
+  and resumable upload behaviour on representative networks.

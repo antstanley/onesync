@@ -1,6 +1,6 @@
 # 09 — Development Guidelines (onesync)
 
-**Status:** Draft · **Date:** 2026-05-11 · **Owner:** Stan
+**Status:** Draft · **Date:** 2026-05-12 · **Owner:** Stan
 
 > **Read first:** the repository's cross-project development guidelines at
 > <https://gist.github.com/antstanley/5bdaa85e63427fadae1c58ae6db77c27>. That document defines

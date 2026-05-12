@@ -1,6 +1,6 @@
 # 04 — OneDrive Adapter
 
-**Status:** Draft · **Date:** 2026-05-11 · **Owner:** Stan
+**Status:** Draft · **Date:** 2026-05-12 · **Owner:** Stan
 
 The OneDrive adapter implements the `RemoteDrive` port against Microsoft Graph. It handles
 authentication for both consumer (OneDrive Personal) and work/school (OneDrive for Business)
@@ -288,14 +288,14 @@ are a latency optimisation only.
 - *Azure AD client registration.* **The user registers their own Azure AD app; onesync does
   not ship a project-owned multi-tenant client ID.** The install docs walk the user through
   the registration form, listing the redirect URI (`http://localhost:<port>/callback`), the
-  required delegated scopes (`Files.ReadWrite.All offline_access User.Read`), and the
+  required delegated scopes (`Files.ReadWrite offline_access User.Read`), and the
   supported-account-types selector. Distributes the per-app rate limits across users and
   removes a project-level tenant-ownership liability. Cross-referenced from
   [`00-overview.md`](00-overview.md).
 - *Webhook receiver via Cloudflare Tunnel.* **The `/subscriptions` callback URL is terminated
   by a `cloudflared` tunnel the operator runs; webhooks are opt-in and off by default.** The
   install docs include a sample `cloudflared` config; the daemon exposes the receiver on a
-  local port and the tunnel maps a stable HTTPS URL to it. Polling via `/delta` remains the
+  local port that the tunnel maps to a stable HTTPS URL. Polling via `/delta` remains the
   always-on fallback so a flaky tunnel does not break correctness, only latency.
 - *SharePoint document libraries.* **In scope for a future milestone (M9+).** The engine and
   Graph adapter route through `/me/drive` today; SharePoint requires resolving a target via

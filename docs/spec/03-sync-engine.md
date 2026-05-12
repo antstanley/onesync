@@ -1,6 +1,6 @@
 # 03 — Sync Engine
 
-**Status:** Draft · **Date:** 2026-05-11 · **Owner:** Stan
+**Status:** Draft · **Date:** 2026-05-12 · **Owner:** Stan
 
 The sync engine is the heart of onesync. It owns the loop that detects changes on both sides,
 reconciles them against the last-known synced state, applies the conflict policy, and produces
@@ -331,15 +331,15 @@ These are persisted as `AuditEvent`s and streamed to the daemon's structured log
   equality.** Some editors zero mtime, some preserve it across copies; only content equality
   is reliable.
 - *Webhook-driven remote change detection.* **Cloudflare Tunnel terminates the Graph
-  `/subscriptions` callback URL; webhooks are opt-in and off by default.** Operators run
-  `cloudflared` against a config the install docs ship and toggle `webhook_enabled` on the
-  pair. Until enabled, the existing `/delta` polling path is the always-on fallback; no
-  remote-change correctness depends on the webhook arriving. Receiver implementation details
-  live in [`04-onedrive-adapter.md`](04-onedrive-adapter.md).
+  `/subscriptions` callback URL; webhooks are opt-in and off by default.** The operator runs
+  `cloudflared` against a config the install docs ship; the daemon opens the Graph
+  subscription only when the operator opts in per-pair. The existing `/delta` polling path is
+  the always-on fallback; no remote-change correctness depends on the webhook arriving.
+  Receiver implementation details live in [`04-onedrive-adapter.md`](04-onedrive-adapter.md).
 
 **Open questions**
 
-- *Adaptive `DELTA_POLL_INTERVAL_MS`.* Current behaviour doubles under throttling; whether to
-  also tighten the interval when local change rate is high is deferred until we have soak-test
-  data on how editors actually distribute writes across a working session. No work committed
-  until the data exists.
+- *Should `DELTA_POLL_INTERVAL_MS` adapt to local change rate?* Current behaviour doubles
+  under throttling; whether to also tighten the interval when local change rate is high
+  awaits soak-test data on how editors distribute writes across a working session. No work
+  committed until the data exists.

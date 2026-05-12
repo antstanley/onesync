@@ -1,6 +1,6 @@
 # 01 — Domain Model
 
-**Status:** Draft · **Date:** 2026-05-11 · **Owner:** Stan
+**Status:** Draft · **Date:** 2026-05-12 · **Owner:** Stan
 
 This page defines the canonical entities, identifier scheme, relationships, and lifecycle state
 machines that the sync engine operates on. Every entity here has a corresponding `$def` in
@@ -368,6 +368,6 @@ Schema-level indexes that back these queries are documented in
 
 **Open questions**
 
-- *Opt-in shallow symlink sync.* The current skip-with-warning policy is final for MVP; an
-  opt-in mode that records `link_target` and syncs it as a string payload remains a possible
-  future feature. No work is committed.
+- *Opt-in shallow symlink sync?* Skipping-with-warning is the only mode the engine supports
+  today. An opt-in mode that records `link_target` and syncs it as a string payload is a
+  possible future feature; no work is committed.
