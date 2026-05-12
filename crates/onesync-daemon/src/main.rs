@@ -13,7 +13,7 @@
 
 use clap::Parser;
 use onesync_core::limits::max_runtime_workers;
-use onesync_daemon::{lock, logging, shutdown, startup, wiring};
+use onesync_daemon::{ipc, lock, logging, methods, shutdown, startup, wiring};
 
 /// Onesync background daemon.
 #[derive(Debug, Parser)]
@@ -69,15 +69,37 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
     tracing::info!("onesyncd started");
 
     // Build ports.
-    let _ports = wiring::build_ports(&dirs.state_dir)?;
+    let ports = wiring::build_ports(&dirs.state_dir)?;
+
+    // Build the per-request dispatch context.
+    let ctx = methods::DispatchCtx {
+        started_at: std::time::Instant::now(),
+        state: ports.state.clone(),
+        local_fs: ports.local_fs.clone(),
+        clock: ports.clock.clone(),
+        ids: ports.ids.clone(),
+        audit: ports.audit.clone(),
+    };
 
     // Start shutdown signal handler.
     let token = shutdown::ShutdownToken::new();
     shutdown::spawn_signal_handler(token.clone());
 
-    // IPC server wired in Task 15.
+    // Start the IPC server. Returns when the shutdown token fires.
+    let runtime_dir = dirs.runtime_dir.clone();
+    let server_token = token.clone();
+    let server_handle =
+        tokio::spawn(async move { ipc::server::run(&runtime_dir, server_token, ctx).await });
+
+    // Wait for shutdown then await the server task.
     let mut rx = token.subscribe();
     let _ = rx.recv().await;
+
+    match server_handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(error = %e, "IPC server exited with error"),
+        Err(e) => tracing::error!(error = %e, "IPC server task join error"),
+    }
 
     tracing::info!("onesyncd stopping");
     Ok(())

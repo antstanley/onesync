@@ -7,7 +7,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use onesync_core::ports::StateStore;
+use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore};
+use onesync_time::UlidGenerator;
 
 pub mod account;
 pub mod audit;
@@ -20,14 +21,25 @@ pub mod service;
 pub mod state;
 
 /// Shared context passed to every method handler.
-// LINT: `state` is used by account/pair/audit handlers arriving in Task 13.
-#[allow(dead_code)]
+///
+/// Carries the port set the methods need to read/write state, emit audit
+/// events, allocate identifiers, and observe wall-clock time. Methods that
+/// need adapters not on this struct (e.g. the per-account `RemoteDrive` for
+/// OAuth or `pair.force_sync`) construct them on demand from `wiring`.
 #[derive(Clone)]
 pub struct DispatchCtx {
     /// When the daemon process started (wall clock anchor for uptime).
     pub started_at: Instant,
-    /// Access to durable state (accounts, pairs, audit events, …).
+    /// Durable state.
     pub state: Arc<dyn StateStore>,
+    /// macOS filesystem adapter (used by pair.add for local-path validation).
+    pub local_fs: Arc<dyn LocalFs>,
+    /// Wall-clock adapter for stamping new rows.
+    pub clock: Arc<dyn Clock>,
+    /// ULID generator for new row identifiers.
+    pub ids: Arc<UlidGenerator>,
+    /// Audit-event sink.
+    pub audit: Arc<dyn AuditSink>,
 }
 
 /// Application-level method error.

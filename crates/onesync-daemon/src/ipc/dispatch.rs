@@ -88,15 +88,28 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
+    use onesync_fs_local::fakes::InMemoryLocalFs;
     use onesync_protocol::rpc::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND};
     use onesync_state::fakes::InMemoryStore;
+    use onesync_time::{SystemClock, UlidGenerator};
 
     use super::*;
+
+    /// Captures audit events to a Vec for assertion.
+    #[derive(Default)]
+    struct NullAuditSink;
+    impl onesync_core::ports::AuditSink for NullAuditSink {
+        fn emit(&self, _event: onesync_protocol::audit::AuditEvent) {}
+    }
 
     fn ctx() -> DispatchCtx {
         DispatchCtx {
             started_at: Instant::now(),
             state: Arc::new(InMemoryStore::new()),
+            local_fs: Arc::new(InMemoryLocalFs::new()),
+            clock: Arc::new(SystemClock),
+            ids: Arc::new(UlidGenerator::default()),
+            audit: Arc::new(NullAuditSink),
         }
     }
 

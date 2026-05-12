@@ -39,7 +39,8 @@ tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tempfile      = { workspace = true }
-onesync-state = { path = "../onesync-state", features = ["fakes"] }
-onesync-time  = { path = "../onesync-time" }
-chrono        = { workspace = true }
+tempfile         = { workspace = true }
+onesync-state    = { path = "../onesync-state", features = ["fakes"] }
+onesync-fs-local = { path = "../onesync-fs-local", features = ["fakes"] }
+onesync-time     = { path = "../onesync-time" }
+chrono           = { workspace = true }

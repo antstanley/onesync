@@ -18,11 +18,22 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-/// Build a `DispatchCtx` backed by an in-memory state store.
+/// Test-only audit sink that discards events.
+#[derive(Default)]
+struct NullAuditSink;
+impl onesync_core::ports::AuditSink for NullAuditSink {
+    fn emit(&self, _event: onesync_protocol::audit::AuditEvent) {}
+}
+
+/// Build a `DispatchCtx` backed by in-memory ports.
 fn make_ctx() -> DispatchCtx {
     DispatchCtx {
         started_at: Instant::now(),
         state: Arc::new(InMemoryStore::new()),
+        local_fs: Arc::new(onesync_fs_local::fakes::InMemoryLocalFs::new()),
+        clock: Arc::new(onesync_time::SystemClock),
+        ids: Arc::new(onesync_time::UlidGenerator::default()),
+        audit: Arc::new(NullAuditSink),
     }
 }
 
