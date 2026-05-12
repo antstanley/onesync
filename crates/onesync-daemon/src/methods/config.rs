@@ -73,6 +73,8 @@ pub async fn set(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError
             allow_metered: p.allow_metered.unwrap_or(false),
             min_free_gib: p.min_free_gib.unwrap_or(2),
             updated_at: now,
+            azure_ad_client_id: String::new(),
+            webhook_listener_port: None,
         },
     };
 

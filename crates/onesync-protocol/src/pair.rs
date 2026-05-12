@@ -41,6 +41,10 @@ pub struct Pair {
     pub last_sync_at: Option<Timestamp>,
     /// Number of unresolved conflicts for this pair.
     pub conflict_count: u32,
+    /// Per-pair opt-in for Graph `/subscriptions` push delivery. Polling is the always-on
+    /// fallback; this flag only governs whether the daemon registers a subscription.
+    #[serde(default)]
+    pub webhook_enabled: bool,
 }
 
 #[cfg(test)]
@@ -60,7 +64,8 @@ mod tests {
             "paused": false,
             "created_at": "2026-05-11T10:00:00Z",
             "updated_at": "2026-05-11T10:00:00Z",
-            "conflict_count": 0
+            "conflict_count": 0,
+            "webhook_enabled": false
         });
         let pair: Pair = serde_json::from_value(raw.clone()).expect("parses");
         assert_eq!(serde_json::to_value(&pair).unwrap(), raw);

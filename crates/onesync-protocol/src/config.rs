@@ -18,4 +18,12 @@ pub struct InstanceConfig {
     pub min_free_gib: u32,
     /// When this configuration was last written.
     pub updated_at: Timestamp,
+    /// User-registered Azure AD application client id. Empty string means unconfigured;
+    /// `account.login.begin` refuses to start until this is set.
+    #[serde(default)]
+    pub azure_ad_client_id: String,
+    /// Local port the Cloudflare-Tunnel webhook receiver binds to. `None` disables the
+    /// receiver; the `/delta` polling path is always available as the fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_listener_port: Option<u16>,
 }

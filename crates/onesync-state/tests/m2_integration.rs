@@ -103,6 +103,7 @@ async fn m2_scan_state_dirty_pipeline() {
         updated_at: ts(1_700_000_000),
         last_sync_at: None,
         conflict_count: 0,
+        webhook_enabled: false,
     };
     store.pair_upsert(&pair).await.expect("pair upsert");
 

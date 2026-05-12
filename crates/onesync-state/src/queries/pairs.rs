@@ -21,8 +21,8 @@ pub fn upsert(conn: &Connection, pair: &Pair) -> Result<(), StateStoreError> {
         "INSERT INTO pairs \
             (id, account_id, local_path, remote_item_id, remote_path, display_name, \
              status, paused, delta_token, errored_reason, created_at, updated_at, \
-             last_sync_at, conflict_count) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             last_sync_at, conflict_count, webhook_enabled) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
             account_id = excluded.account_id, \
             local_path = excluded.local_path, \
@@ -35,7 +35,8 @@ pub fn upsert(conn: &Connection, pair: &Pair) -> Result<(), StateStoreError> {
             errored_reason = excluded.errored_reason, \
             updated_at = excluded.updated_at, \
             last_sync_at = excluded.last_sync_at, \
-            conflict_count = excluded.conflict_count",
+            conflict_count = excluded.conflict_count, \
+            webhook_enabled = excluded.webhook_enabled",
         params![
             pair.id.to_string(),
             pair.account_id.to_string(),
@@ -51,6 +52,7 @@ pub fn upsert(conn: &Connection, pair: &Pair) -> Result<(), StateStoreError> {
             pair.updated_at.into_inner().to_rfc3339(),
             pair.last_sync_at.map(|ts| ts.into_inner().to_rfc3339()),
             i64::from(pair.conflict_count),
+            i32::from(pair.webhook_enabled),
         ],
     )
     .map(|_| ())
@@ -65,7 +67,7 @@ pub fn get(conn: &Connection, id: &PairId) -> Result<Option<Pair>, StateStoreErr
     conn.query_row(
         "SELECT id, account_id, local_path, remote_item_id, remote_path, display_name, \
                 status, paused, delta_token, errored_reason, created_at, updated_at, \
-                last_sync_at, conflict_count \
+                last_sync_at, conflict_count, webhook_enabled \
          FROM pairs WHERE id = ?",
         params![id.to_string()],
         row_to_pair,
@@ -86,7 +88,7 @@ pub fn list(
 ) -> Result<Vec<Pair>, StateStoreError> {
     let mut sql = "SELECT id, account_id, local_path, remote_item_id, remote_path, display_name, \
                           status, paused, delta_token, errored_reason, created_at, updated_at, \
-                          last_sync_at, conflict_count \
+                          last_sync_at, conflict_count, webhook_enabled \
                    FROM pairs WHERE 1=1"
         .to_owned();
     let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -121,7 +123,7 @@ pub fn active(conn: &Connection) -> Result<Vec<Pair>, StateStoreError> {
         .prepare(
             "SELECT id, account_id, local_path, remote_item_id, remote_path, display_name, \
                     status, paused, delta_token, errored_reason, created_at, updated_at, \
-                    last_sync_at, conflict_count \
+                    last_sync_at, conflict_count, webhook_enabled \
              FROM pairs WHERE status <> 'removed' ORDER BY id",
         )
         .map_err(|e| StateStoreError::Sqlite(e.to_string()))?;
@@ -145,6 +147,7 @@ fn row_to_pair(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pair> {
     let updated_at_str: String = row.get(11)?;
     let last_sync_at_opt: Option<String> = row.get(12)?;
     let conflict_count_i64: i64 = row.get(13)?;
+    let webhook_enabled_int: i32 = row.get(14)?;
 
     Ok(Pair {
         id: id_str
@@ -173,6 +176,7 @@ fn row_to_pair(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pair> {
         updated_at: parse_timestamp(&updated_at_str)?,
         last_sync_at: last_sync_at_opt.map(|s| parse_timestamp(&s)).transpose()?,
         conflict_count: u32::try_from(conflict_count_i64).unwrap_or(0),
+        webhook_enabled: webhook_enabled_int != 0,
     })
 }
 
@@ -265,6 +269,7 @@ mod tests {
             ),
             last_sync_at: None,
             conflict_count: 0,
+            webhook_enabled: false,
         }
     }
 

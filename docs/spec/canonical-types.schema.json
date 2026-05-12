@@ -211,12 +211,13 @@
         "created_at":     { "$ref": "#/$defs/Timestamp" },
         "updated_at":     { "$ref": "#/$defs/Timestamp" },
         "last_sync_at":   { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
-        "conflict_count": { "type": "integer", "minimum": 0 }
+        "conflict_count": { "type": "integer", "minimum": 0 },
+        "webhook_enabled": { "type": "boolean", "description": "Per-pair opt-in for Graph /subscriptions push delivery. Defaults to false." }
       },
       "required": [
         "id", "account_id", "local_path", "remote_item_id", "remote_path",
         "display_name", "status", "paused",
-        "created_at", "updated_at", "conflict_count"
+        "created_at", "updated_at", "conflict_count", "webhook_enabled"
       ],
       "additionalProperties": false
     },
@@ -324,13 +325,15 @@
     "InstanceConfig": {
       "type": "object",
       "properties": {
-        "log_level":     { "$ref": "#/$defs/LogLevel" },
-        "notify":        { "type": "boolean" },
-        "allow_metered": { "type": "boolean" },
-        "min_free_gib":  { "type": "integer", "minimum": 0 },
-        "updated_at":    { "$ref": "#/$defs/Timestamp" }
+        "log_level":             { "$ref": "#/$defs/LogLevel" },
+        "notify":                { "type": "boolean" },
+        "allow_metered":         { "type": "boolean" },
+        "min_free_gib":          { "type": "integer", "minimum": 0 },
+        "updated_at":            { "$ref": "#/$defs/Timestamp" },
+        "azure_ad_client_id":    { "type": "string", "description": "User-registered Azure AD application client id. Empty string means unconfigured; account.login.begin refuses to start until this is set." },
+        "webhook_listener_port": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 65535 }, { "type": "null" }], "description": "Local port the Cloudflare-Tunnel webhook receiver binds to. Null disables the receiver; polling is always available." }
       },
-      "required": ["log_level", "notify", "allow_metered", "min_free_gib", "updated_at"],
+      "required": ["log_level", "notify", "allow_metered", "min_free_gib", "updated_at", "azure_ad_client_id"],
       "additionalProperties": false
     },
 

@@ -416,6 +416,7 @@ mod tests {
             updated_at: ts(1_700_000_000),
             last_sync_at: None,
             conflict_count: 0,
+            webhook_enabled: false,
         };
         store.pair_upsert(&pair).await.unwrap();
 
@@ -435,6 +436,7 @@ mod tests {
             updated_at: ts(1_700_000_000),
             last_sync_at: None,
             conflict_count: 0,
+            webhook_enabled: false,
         };
         store.pair_upsert(&removed_pair).await.unwrap();
 
@@ -636,6 +638,7 @@ mod tests {
             updated_at: ts(1_700_000_000),
             last_sync_at: None,
             conflict_count: 0,
+            webhook_enabled: false,
         };
         store.pair_upsert(&pair).await.unwrap();
         assert_eq!(store.pairs_active().await.unwrap().len(), 1);

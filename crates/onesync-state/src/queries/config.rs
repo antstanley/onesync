@@ -17,7 +17,8 @@ use crate::queries::parse_timestamp;
 /// Returns `StateStoreError::Sqlite` if the SQL call fails or the row can't be decoded.
 pub fn get(conn: &Connection) -> Result<Option<InstanceConfig>, StateStoreError> {
     conn.query_row(
-        "SELECT log_level, notify, allow_metered, min_free_gib, updated_at \
+        "SELECT log_level, notify, allow_metered, min_free_gib, updated_at, \
+                azure_ad_client_id, webhook_listener_port \
          FROM instance_config WHERE id = 1",
         [],
         row_to_config,
@@ -32,20 +33,25 @@ pub fn get(conn: &Connection) -> Result<Option<InstanceConfig>, StateStoreError>
 /// Returns `StateStoreError::Sqlite` if the SQL call fails.
 pub fn upsert(conn: &Connection, cfg: &InstanceConfig) -> Result<(), StateStoreError> {
     conn.execute(
-        "INSERT INTO instance_config (id, log_level, notify, allow_metered, min_free_gib, updated_at) \
-         VALUES (1, ?, ?, ?, ?, ?) \
+        "INSERT INTO instance_config (id, log_level, notify, allow_metered, min_free_gib, updated_at, \
+                                       azure_ad_client_id, webhook_listener_port) \
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
             log_level = excluded.log_level, \
             notify = excluded.notify, \
             allow_metered = excluded.allow_metered, \
             min_free_gib = excluded.min_free_gib, \
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at, \
+            azure_ad_client_id = excluded.azure_ad_client_id, \
+            webhook_listener_port = excluded.webhook_listener_port",
         params![
             log_level_to_str(cfg.log_level),
             i32::from(cfg.notify),
             i32::from(cfg.allow_metered),
             i64::from(cfg.min_free_gib),
             cfg.updated_at.into_inner().to_rfc3339(),
+            cfg.azure_ad_client_id,
+            cfg.webhook_listener_port.map(i64::from),
         ],
     )
     .map(|_| ())
@@ -76,6 +82,8 @@ fn row_to_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceConfig> {
     let allow_metered_int: i32 = row.get(2)?;
     let min_free_gib_i64: i64 = row.get(3)?;
     let updated_at_str: String = row.get(4)?;
+    let azure_ad_client_id: String = row.get(5)?;
+    let webhook_listener_port_opt: Option<i64> = row.get(6)?;
 
     Ok(InstanceConfig {
         log_level: log_level_from_str(&log_level_str)?,
@@ -83,6 +91,8 @@ fn row_to_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceConfig> {
         allow_metered: allow_metered_int != 0,
         min_free_gib: u32::try_from(min_free_gib_i64).unwrap_or(0),
         updated_at: parse_timestamp(&updated_at_str)?,
+        azure_ad_client_id,
+        webhook_listener_port: webhook_listener_port_opt.and_then(|p| u16::try_from(p).ok()),
     })
 }
 
@@ -146,6 +156,8 @@ mod tests {
             allow_metered: true,
             min_free_gib: 10,
             updated_at: test_timestamp(),
+            azure_ad_client_id: String::new(),
+            webhook_listener_port: None,
         };
         upsert(&conn, &custom).expect("upsert");
 
@@ -174,6 +186,8 @@ mod tests {
             allow_metered: false,
             min_free_gib: 5,
             updated_at: test_timestamp(),
+            azure_ad_client_id: String::new(),
+            webhook_listener_port: None,
         };
         upsert(&conn, &updated).expect("upsert");
 

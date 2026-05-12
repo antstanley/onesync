@@ -264,6 +264,7 @@ mod tests {
             ),
             last_sync_at: None,
             conflict_count: 0,
+            webhook_enabled: false,
         }
     }
 

@@ -79,6 +79,7 @@ async fn full_pipeline_round_trips() {
         updated_at: ts(1_700_000_000),
         last_sync_at: None,
         conflict_count: 0,
+        webhook_enabled: false,
     };
     store.pair_upsert(&pair).await.expect("pair upsert");
     let active = store.pairs_active().await.expect("active");

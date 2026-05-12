@@ -79,7 +79,8 @@ fn pair_validates() {
         "paused": false,
         "created_at": "2026-05-11T10:00:00Z",
         "updated_at": "2026-05-11T10:00:00Z",
-        "conflict_count": 0
+        "conflict_count": 0,
+        "webhook_enabled": false
     });
     validate_against(&schema(), "Pair", &pair);
     let _: pair::Pair = serde_json::from_value(pair).expect("rust round-trip");
@@ -112,7 +113,8 @@ fn instance_config_validates() {
         "notify": true,
         "allow_metered": false,
         "min_free_gib": 2,
-        "updated_at": "2026-05-11T10:00:00Z"
+        "updated_at": "2026-05-11T10:00:00Z",
+        "azure_ad_client_id": ""
     });
     validate_against(&schema(), "InstanceConfig", &cfg);
     let _: config::InstanceConfig = serde_json::from_value(cfg).expect("rust round-trip");

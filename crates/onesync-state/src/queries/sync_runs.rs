@@ -246,6 +246,7 @@ mod tests {
             updated_at: base_ts(),
             last_sync_at: None,
             conflict_count: 0,
+            webhook_enabled: false,
         }
     }
 
