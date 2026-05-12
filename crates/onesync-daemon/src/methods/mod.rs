@@ -4,6 +4,12 @@
 //! [`DispatchCtx`] reference and the raw `params` JSON value, and return a
 //! [`serde_json::Value`] on success or a [`MethodError`] on failure.
 
+// LINT: handlers share a single async signature so they're dispatchable from one async match.
+// Stubs and pure-CPU helpers don't await, which clippy would otherwise flag.
+#![allow(clippy::unused_async)]
+// LINT: `match Some(x) { ... }` is the readable shape for these one-off Option branches.
+#![allow(clippy::option_if_let_else)]
+
 use std::sync::Arc;
 use std::time::Instant;
 

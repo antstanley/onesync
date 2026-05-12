@@ -20,7 +20,7 @@ const SCHEMA_VERSION: u32 = 1;
 /// Returns `{ "uptime_s": <u64>, "version": "<semver>", "schema_version": <u32> }`.
 // LINT: Result return is the uniform handler signature; ping never errs but others do.
 #[allow(clippy::unnecessary_wraps)]
-pub fn ping(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn ping(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
     let uptime_s = ctx.started_at.elapsed().as_secs();
     Ok(serde_json::json!({
         "uptime_s": uptime_s,
@@ -36,7 +36,7 @@ pub fn ping(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
 /// for now returns a minimal stub.
 // LINT: Result return is the uniform handler signature; diagnostics will err on db failures.
 #[allow(clippy::unnecessary_wraps)]
-pub fn diagnostics(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn diagnostics(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
     let uptime_s = ctx.started_at.elapsed().as_secs();
     Ok(serde_json::json!({
         "version": VERSION,

@@ -14,13 +14,15 @@ use onesync_core::ports::{StateError, StateStore};
 use onesync_protocol::{
     account::Account,
     audit::AuditEvent,
+    config::InstanceConfig,
     conflict::Conflict,
-    enums::{FileOpStatus, FileSyncState, PairStatus},
+    enums::{AuditLevel, ConflictResolution, FileOpStatus, FileSyncState, PairStatus},
     file_entry::FileEntry,
     file_op::FileOp,
     id::{AccountId, ConflictId, FileOpId, PairId, SyncRunId},
     pair::Pair,
     path::RelPath,
+    primitives::Timestamp,
     sync_run::SyncRun,
 };
 
@@ -34,6 +36,7 @@ pub struct InMemoryStore {
     conflicts: Mutex<HashMap<ConflictId, Conflict>>,
     sync_runs: Mutex<HashMap<SyncRunId, SyncRun>>,
     audit: Mutex<Vec<AuditEvent>>,
+    config: Mutex<Option<InstanceConfig>>,
 }
 
 impl InMemoryStore {
@@ -179,6 +182,154 @@ impl StateStore for InMemoryStore {
     async fn audit_append(&self, evt: &AuditEvent) -> Result<(), StateError> {
         self.audit.lock().expect("audit lock").push(evt.clone());
         Ok(())
+    }
+
+    async fn config_get(&self) -> Result<Option<InstanceConfig>, StateError> {
+        Ok(self.config.lock().expect("cfg lock").clone())
+    }
+
+    async fn config_upsert(&self, cfg: &InstanceConfig) -> Result<(), StateError> {
+        *self.config.lock().expect("cfg lock") = Some(cfg.clone());
+        Ok(())
+    }
+
+    async fn accounts_list(&self) -> Result<Vec<Account>, StateError> {
+        let mut out: Vec<Account> = self
+            .accounts
+            .lock()
+            .expect("acct lock")
+            .values()
+            .cloned()
+            .collect();
+        out.sort_by_key(|a| a.id.to_string());
+        Ok(out)
+    }
+
+    async fn account_remove(&self, id: &AccountId) -> Result<(), StateError> {
+        // Cascade: remove pairs and dependent rows for this account, matching SQLite FK behaviour.
+        let mut accts = self.accounts.lock().expect("acct lock");
+        accts.remove(id);
+        drop(accts);
+
+        let pair_ids: Vec<PairId> = {
+            let pairs = self.pairs.lock().expect("pair lock");
+            pairs
+                .values()
+                .filter(|p| &p.account_id == id)
+                .map(|p| p.id)
+                .collect()
+        };
+        let mut pairs = self.pairs.lock().expect("pair lock");
+        for pid in &pair_ids {
+            pairs.remove(pid);
+        }
+        drop(pairs);
+
+        let pair_set: std::collections::HashSet<PairId> = pair_ids.into_iter().collect();
+        self.file_entries
+            .lock()
+            .expect("fe lock")
+            .retain(|(p, _), _| !pair_set.contains(p));
+        self.file_ops
+            .lock()
+            .expect("op lock")
+            .retain(|_, op| !pair_set.contains(&op.pair_id));
+        self.conflicts
+            .lock()
+            .expect("cf lock")
+            .retain(|_, c| !pair_set.contains(&c.pair_id));
+        self.sync_runs
+            .lock()
+            .expect("run lock")
+            .retain(|_, r| !pair_set.contains(&r.pair_id));
+        Ok(())
+    }
+
+    async fn pairs_list(
+        &self,
+        account: Option<&AccountId>,
+        include_removed: bool,
+    ) -> Result<Vec<Pair>, StateError> {
+        let mut out: Vec<Pair> = self
+            .pairs
+            .lock()
+            .expect("pair lock")
+            .values()
+            .filter(|p| account.is_none_or(|a| &p.account_id == a))
+            .filter(|p| include_removed || p.status != PairStatus::Removed)
+            .cloned()
+            .collect();
+        out.sort_by_key(|p| p.id.to_string());
+        Ok(out)
+    }
+
+    async fn conflict_get(&self, id: &ConflictId) -> Result<Option<Conflict>, StateError> {
+        Ok(self.conflicts.lock().expect("cf lock").get(id).cloned())
+    }
+
+    async fn conflict_resolve(
+        &self,
+        id: &ConflictId,
+        resolution: ConflictResolution,
+        resolved_at: Timestamp,
+        note: Option<String>,
+    ) -> Result<(), StateError> {
+        if let Some(c) = self.conflicts.lock().expect("cf lock").get_mut(id) {
+            c.resolved_at = Some(resolved_at);
+            c.resolution = Some(resolution);
+            if note.is_some() {
+                c.note = note;
+            }
+        }
+        Ok(())
+    }
+
+    async fn runs_recent(&self, pair: &PairId, limit: usize) -> Result<Vec<SyncRun>, StateError> {
+        let mut out: Vec<SyncRun> = self
+            .sync_runs
+            .lock()
+            .expect("run lock")
+            .values()
+            .filter(|r| &r.pair_id == pair)
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn run_get(&self, id: &SyncRunId) -> Result<Option<SyncRun>, StateError> {
+        Ok(self.sync_runs.lock().expect("run lock").get(id).cloned())
+    }
+
+    async fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEvent>, StateError> {
+        let mut out: Vec<AuditEvent> = self.audit.lock().expect("audit lock").clone();
+        out.sort_by_key(|e| std::cmp::Reverse(e.ts));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn audit_search(
+        &self,
+        from_ts: &Timestamp,
+        to_ts: &Timestamp,
+        level: Option<AuditLevel>,
+        pair: Option<&PairId>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, StateError> {
+        let mut out: Vec<AuditEvent> = self
+            .audit
+            .lock()
+            .expect("audit lock")
+            .iter()
+            .filter(|e| &e.ts >= from_ts && &e.ts <= to_ts)
+            .filter(|e| level.is_none_or(|l| e.level == l))
+            .filter(|e| pair.is_none_or(|p| e.pair_id.as_ref() == Some(p)))
+            .cloned()
+            .collect();
+        out.sort_by_key(|e| std::cmp::Reverse(e.ts));
+        out.truncate(limit);
+        Ok(out)
     }
 }
 

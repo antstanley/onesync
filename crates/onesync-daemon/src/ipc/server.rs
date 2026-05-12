@@ -88,7 +88,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: DispatchCtx) {
         match read_frame(&mut reader).await {
             Ok(line) => {
                 tracing::debug!(frame = %line, "ipc frame received");
-                let response = parse_and_dispatch(&line, &ctx);
+                let response = parse_and_dispatch(&line, &ctx).await;
                 let serialised = serde_json::to_string(&response)
                     .unwrap_or_else(|_| {
                         r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal serialisation error"}}"#
@@ -115,11 +115,14 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: DispatchCtx) {
 /// Parse a raw JSON line as a `JsonRpcRequest` and dispatch it.
 ///
 /// Returns a parse-error response if the JSON is invalid.
-fn parse_and_dispatch(line: &str, ctx: &DispatchCtx) -> onesync_protocol::rpc::JsonRpcResponse {
+async fn parse_and_dispatch(
+    line: &str,
+    ctx: &DispatchCtx,
+) -> onesync_protocol::rpc::JsonRpcResponse {
     use onesync_protocol::rpc::{self, JsonRpcResponse};
 
     match serde_json::from_str::<onesync_protocol::rpc::JsonRpcRequest>(line) {
-        Ok(req) => crate::ipc::dispatch::dispatch(&req, ctx),
+        Ok(req) => crate::ipc::dispatch::dispatch(&req, ctx).await,
         Err(e) => JsonRpcResponse::error(
             None::<String>,
             rpc::PARSE_ERROR,

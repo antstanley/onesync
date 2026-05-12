@@ -34,6 +34,11 @@ struct Args {
     /// Launched by launchd (adjusts log format to work with `os_log`).
     #[arg(long)]
     launchd: bool,
+
+    /// Self-test mode: resolve directories, open the state store (runs migrations),
+    /// print a summary, and exit 0. Used by service-install validation and CI smoke tests.
+    #[arg(long)]
+    check: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -46,6 +51,18 @@ fn main() -> anyhow::Result<()> {
         args.log_dir.as_deref(),
     )?;
     dirs.create_all()?;
+
+    // --check: smoke-test then exit before acquiring the advisory lock or spawning the runtime.
+    if args.check {
+        let _ports = wiring::build_ports(&dirs.state_dir)?;
+        println!(
+            "onesyncd --check: ok  state={} runtime={} log={}",
+            dirs.state_dir.display(),
+            dirs.runtime_dir.display(),
+            dirs.log_dir.display()
+        );
+        return Ok(());
+    }
 
     // Step 2: Acquire advisory lock.
     let _lock = lock::acquire(&dirs.runtime_dir)?;

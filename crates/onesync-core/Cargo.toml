@@ -27,3 +27,4 @@ onesync-time    = { path = "../onesync-time" }
 onesync-state   = { path = "../onesync-state", features = ["fakes"] }
 onesync-fs-local = { path = "../onesync-fs-local", features = ["fakes"] }
 onesync-graph   = { path = "../onesync-graph", features = ["fakes"] }
+bytes           = { workspace = true }

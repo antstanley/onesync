@@ -11,55 +11,54 @@ use crate::methods::{self, DispatchCtx};
 /// Dispatch one JSON-RPC request to the appropriate handler.
 ///
 /// Returns a [`JsonRpcResponse`] suitable for serialising back to the client.
-#[must_use]
-pub fn dispatch(req: &JsonRpcRequest, ctx: &DispatchCtx) -> JsonRpcResponse {
+pub async fn dispatch(req: &JsonRpcRequest, ctx: &DispatchCtx) -> JsonRpcResponse {
     let id = id_str(req.id.as_ref());
 
     let result = match req.method.as_str() {
         // health
-        "health.ping" => methods::health::ping(ctx, &req.params),
-        "health.diagnostics" => methods::health::diagnostics(ctx, &req.params),
+        "health.ping" => methods::health::ping(ctx, &req.params).await,
+        "health.diagnostics" => methods::health::diagnostics(ctx, &req.params).await,
         // config
-        "config.get" => methods::config::get(ctx, &req.params),
-        "config.set" => methods::config::set(ctx, &req.params),
-        "config.reload" => methods::config::reload(ctx, &req.params),
+        "config.get" => methods::config::get(ctx, &req.params).await,
+        "config.set" => methods::config::set(ctx, &req.params).await,
+        "config.reload" => methods::config::reload(ctx, &req.params).await,
         // account
-        "account.login.begin" => methods::account::login_begin(ctx, &req.params),
-        "account.login.await" => methods::account::login_await(ctx, &req.params),
-        "account.list" => methods::account::list(ctx, &req.params),
-        "account.get" => methods::account::get(ctx, &req.params),
-        "account.remove" => methods::account::remove(ctx, &req.params),
+        "account.login.begin" => methods::account::login_begin(ctx, &req.params).await,
+        "account.login.await" => methods::account::login_await(ctx, &req.params).await,
+        "account.list" => methods::account::list(ctx, &req.params).await,
+        "account.get" => methods::account::get(ctx, &req.params).await,
+        "account.remove" => methods::account::remove(ctx, &req.params).await,
         // pair
-        "pair.add" => methods::pair::add(ctx, &req.params),
-        "pair.list" => methods::pair::list(ctx, &req.params),
-        "pair.get" => methods::pair::get(ctx, &req.params),
-        "pair.pause" => methods::pair::pause(ctx, &req.params),
-        "pair.resume" => methods::pair::resume(ctx, &req.params),
-        "pair.remove" => methods::pair::remove(ctx, &req.params),
-        "pair.force_sync" => methods::pair::force_sync(ctx, &req.params),
-        "pair.status" => methods::pair::status(ctx, &req.params),
-        "pair.subscribe" => methods::pair::subscribe(ctx, &req.params),
+        "pair.add" => methods::pair::add(ctx, &req.params).await,
+        "pair.list" => methods::pair::list(ctx, &req.params).await,
+        "pair.get" => methods::pair::get(ctx, &req.params).await,
+        "pair.pause" => methods::pair::pause(ctx, &req.params).await,
+        "pair.resume" => methods::pair::resume(ctx, &req.params).await,
+        "pair.remove" => methods::pair::remove(ctx, &req.params).await,
+        "pair.force_sync" => methods::pair::force_sync(ctx, &req.params).await,
+        "pair.status" => methods::pair::status(ctx, &req.params).await,
+        "pair.subscribe" => methods::pair::subscribe(ctx, &req.params).await,
         // conflict
-        "conflict.list" => methods::conflict::list(ctx, &req.params),
-        "conflict.get" => methods::conflict::get(ctx, &req.params),
-        "conflict.resolve" => methods::conflict::resolve(ctx, &req.params),
-        "conflict.subscribe" => methods::conflict::subscribe(ctx, &req.params),
+        "conflict.list" => methods::conflict::list(ctx, &req.params).await,
+        "conflict.get" => methods::conflict::get(ctx, &req.params).await,
+        "conflict.resolve" => methods::conflict::resolve(ctx, &req.params).await,
+        "conflict.subscribe" => methods::conflict::subscribe(ctx, &req.params).await,
         // audit
-        "audit.tail" => methods::audit::tail(ctx, &req.params),
-        "audit.search" => methods::audit::search(ctx, &req.params),
+        "audit.tail" => methods::audit::tail(ctx, &req.params).await,
+        "audit.search" => methods::audit::search(ctx, &req.params).await,
         // run
-        "run.list" => methods::run::list(ctx, &req.params),
-        "run.get" => methods::run::get(ctx, &req.params),
+        "run.list" => methods::run::list(ctx, &req.params).await,
+        "run.get" => methods::run::get(ctx, &req.params).await,
         // state
-        "state.backup" => methods::state::backup(ctx, &req.params),
-        "state.export" => methods::state::export(ctx, &req.params),
-        "state.repair.permissions" => methods::state::repair_permissions(ctx, &req.params),
-        "state.compact.now" => methods::state::compact_now(ctx, &req.params),
+        "state.backup" => methods::state::backup(ctx, &req.params).await,
+        "state.export" => methods::state::export(ctx, &req.params).await,
+        "state.repair.permissions" => methods::state::repair_permissions(ctx, &req.params).await,
+        "state.compact.now" => methods::state::compact_now(ctx, &req.params).await,
         // service + subscription
-        "service.shutdown" => methods::service::shutdown(ctx, &req.params),
-        "service.upgrade.prepare" => methods::service::upgrade_prepare(ctx, &req.params),
-        "service.upgrade.commit" => methods::service::upgrade_commit(ctx, &req.params),
-        "subscription.cancel" => methods::service::subscription_cancel(ctx, &req.params),
+        "service.shutdown" => methods::service::shutdown(ctx, &req.params).await,
+        "service.upgrade.prepare" => methods::service::upgrade_prepare(ctx, &req.params).await,
+        "service.upgrade.commit" => methods::service::upgrade_commit(ctx, &req.params).await,
+        "subscription.cancel" => methods::service::subscription_cancel(ctx, &req.params).await,
         _ => Err(methods::MethodError::new(
             rpc::METHOD_NOT_FOUND,
             format!("method not found: {}", req.method),
@@ -113,17 +112,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn health_ping_returns_ok() {
+    #[tokio::test]
+    async fn health_ping_returns_ok() {
         let req = JsonRpcRequest::new("1", "health.ping", serde_json::Value::Null);
-        let resp = dispatch(&req, &ctx());
+        let resp = dispatch(&req, &ctx()).await;
         assert!(matches!(resp, JsonRpcResponse::Ok(_)));
     }
 
-    #[test]
-    fn unknown_method_returns_method_not_found() {
+    #[tokio::test]
+    async fn unknown_method_returns_method_not_found() {
         let req = JsonRpcRequest::new("2", "unknown.method", serde_json::Value::Null);
-        let resp = dispatch(&req, &ctx());
+        let resp = dispatch(&req, &ctx()).await;
         match resp {
             JsonRpcResponse::Err(e) => assert_eq!(e.error.code, METHOD_NOT_FOUND),
             JsonRpcResponse::Ok(_) => unreachable!("expected error response"),

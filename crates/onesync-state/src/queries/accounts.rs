@@ -49,6 +49,38 @@ pub fn upsert(conn: &Connection, account: &Account) -> Result<(), StateStoreErro
     .map_err(|e| StateStoreError::Sqlite(e.to_string()))
 }
 
+/// Fetch all accounts ordered by id.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails or rows can't be decoded.
+pub fn list(conn: &Connection) -> Result<Vec<Account>, StateStoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, upn, tenant_id, drive_id, display_name, keychain_ref, scopes_json, created_at, updated_at \
+             FROM accounts ORDER BY id",
+        )
+        .map_err(|e| StateStoreError::Sqlite(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([], row_to_account)
+        .map_err(|e| StateStoreError::Sqlite(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| StateStoreError::Sqlite(e.to_string())))
+        .collect()
+}
+
+/// Delete an account row by id.
+///
+/// Foreign-key cascades remove the account's pairs and any rows that referenced them.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails.
+pub fn remove(conn: &Connection, id: &AccountId) -> Result<(), StateStoreError> {
+    conn.execute("DELETE FROM accounts WHERE id = ?", params![id.to_string()])
+        .map(|_| ())
+        .map_err(|e| StateStoreError::Sqlite(e.to_string()))
+}
+
 /// Fetch an account by id.
 ///
 /// # Errors

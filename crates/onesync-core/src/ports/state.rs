@@ -73,4 +73,58 @@ pub trait StateStore: Send + Sync {
     async fn conflicts_unresolved(&self, pair: &PairId) -> Result<Vec<Conflict>, StateError>;
     /// Append a structured audit event.
     async fn audit_append(&self, evt: &AuditEvent) -> Result<(), StateError>;
+
+    // ── M8 additions (RPC handler wiring) ────────────────────────────────
+
+    /// Return the singleton instance config; `None` if uninitialised.
+    async fn config_get(
+        &self,
+    ) -> Result<Option<onesync_protocol::config::InstanceConfig>, StateError>;
+    /// Insert or update the singleton instance config.
+    async fn config_upsert(
+        &self,
+        cfg: &onesync_protocol::config::InstanceConfig,
+    ) -> Result<(), StateError>;
+    /// List accounts (no filter; small N).
+    async fn accounts_list(&self) -> Result<Vec<Account>, StateError>;
+    /// Delete an account row (FK cascades remove pairs).
+    async fn account_remove(&self, id: &AccountId) -> Result<(), StateError>;
+    /// List pairs (optionally filtered by account); `include_removed` controls
+    /// whether soft-deleted rows are included.
+    async fn pairs_list(
+        &self,
+        account: Option<&AccountId>,
+        include_removed: bool,
+    ) -> Result<Vec<Pair>, StateError>;
+    /// Fetch one conflict by id.
+    async fn conflict_get(
+        &self,
+        id: &onesync_protocol::id::ConflictId,
+    ) -> Result<Option<Conflict>, StateError>;
+    /// Mark a conflict resolved.
+    async fn conflict_resolve(
+        &self,
+        id: &onesync_protocol::id::ConflictId,
+        resolution: onesync_protocol::enums::ConflictResolution,
+        resolved_at: onesync_protocol::primitives::Timestamp,
+        note: Option<String>,
+    ) -> Result<(), StateError>;
+    /// Recent sync runs for a pair (newest first).
+    async fn runs_recent(&self, pair: &PairId, limit: usize) -> Result<Vec<SyncRun>, StateError>;
+    /// Fetch one sync run by id.
+    async fn run_get(
+        &self,
+        id: &onesync_protocol::id::SyncRunId,
+    ) -> Result<Option<SyncRun>, StateError>;
+    /// Recent audit events (newest first).
+    async fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEvent>, StateError>;
+    /// Audit-event time-window search.
+    async fn audit_search(
+        &self,
+        from_ts: &onesync_protocol::primitives::Timestamp,
+        to_ts: &onesync_protocol::primitives::Timestamp,
+        level: Option<onesync_protocol::enums::AuditLevel>,
+        pair: Option<&PairId>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, StateError>;
 }

@@ -1,10 +1,10 @@
 //! `sync_runs` query helpers.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use onesync_protocol::{
     enums::{RunOutcome, RunTrigger},
-    id::PairId,
+    id::{PairId, SyncRunId},
     sync_run::SyncRun,
 };
 
@@ -48,6 +48,22 @@ pub fn record(conn: &Connection, run: &SyncRun) -> Result<(), StateStoreError> {
         ],
     )
     .map(|_| ())
+    .map_err(|e| StateStoreError::Sqlite(e.to_string()))
+}
+
+/// Fetch one sync run by id.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails or the row can't be decoded.
+pub fn get(conn: &Connection, id: &SyncRunId) -> Result<Option<SyncRun>, StateStoreError> {
+    conn.query_row(
+        "SELECT id, pair_id, trigger, started_at, finished_at, \
+                local_ops, remote_ops, bytes_uploaded, bytes_downloaded, outcome, outcome_detail \
+         FROM sync_runs WHERE id = ?",
+        params![id.to_string()],
+        row_to_run,
+    )
+    .optional()
     .map_err(|e| StateStoreError::Sqlite(e.to_string()))
 }
 

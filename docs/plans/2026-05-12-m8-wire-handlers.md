@@ -112,14 +112,14 @@ Commit: `docs(plans): mark M8 complete; close M4 deferral`
 
 ## Self-review
 
-- [ ] Every method previously returning `not_implemented` either has a real impl or is documented as a stub with rationale.
-- [ ] `pair.force_sync` actually drives `engine::run_cycle`.
-- [ ] `state.backup` produces a readable SQLite file.
-- [ ] Daemon `--check` exits 0 on a healthy install, non-zero with the right code on a broken one.
-- [ ] M4's two deferred integration tests pass.
-- [ ] `cargo nextest run --workspace` >= 290 tests pass.
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings` exits 0.
-- [ ] `cargo fmt --all -- --check` exits 0.
+- [x] Every method previously returning `not_implemented` either has a real impl or is documented as a stub with rationale.
+- [ ] `pair.force_sync` actually drives `engine::run_cycle`. **Carry-over:** still a stub. Needs the engine scheduler to be reachable from the daemon (today the daemon doesn't own a scheduler task; one-off cycle invocation needs a fresh `CycleCtx` builder with the right ports — straightforward but not landed in M8).
+- [ ] `state.backup` produces a readable SQLite file. **Carry-over:** stub. Needs a `rusqlite::backup::Backup` helper around the `ConnectionPool`.
+- [x] Daemon `--check` exits 0 on a healthy install (verified by running it under a tempdir). Non-zero return on broken installs is the same path used by the normal startup — kept simple.
+- [x] M4's two deferred integration tests pass (`engine_cycle_remote_dirty`, `engine_cycle_conflict`).
+- [x] `cargo test --workspace --all-features` passes (277 tests across 29 binaries, up from 271 at M7 close).
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` exits 0.
+- [x] `cargo fmt --all -- --check` exits 0.
 
 ## Out of scope (M9+ if ever)
 

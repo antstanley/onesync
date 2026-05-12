@@ -6,13 +6,15 @@ use onesync_core::ports::{StateError, StateStore};
 use onesync_protocol::{
     account::Account,
     audit::AuditEvent,
+    config::InstanceConfig,
     conflict::Conflict,
-    enums::FileOpStatus,
+    enums::{AuditLevel, ConflictResolution, FileOpStatus},
     file_entry::FileEntry,
     file_op::FileOp,
-    id::{AccountId, FileOpId, PairId},
+    id::{AccountId, ConflictId, FileOpId, PairId, SyncRunId},
     pair::Pair,
     path::RelPath,
+    primitives::Timestamp,
     sync_run::SyncRun,
 };
 
@@ -209,6 +211,145 @@ impl StateStore for SqliteStore {
         tokio::task::spawn_blocking(move || {
             let conn = pool.get().map_err(map_err)?;
             queries::audit::append(&conn, &evt).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn config_get(&self) -> Result<Option<InstanceConfig>, StateError> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::config::get(&conn).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn config_upsert(&self, cfg: &InstanceConfig) -> Result<(), StateError> {
+        let pool = self.pool.clone();
+        let cfg = cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::config::upsert(&conn, &cfg).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn accounts_list(&self) -> Result<Vec<Account>, StateError> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::accounts::list(&conn).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn account_remove(&self, id: &AccountId) -> Result<(), StateError> {
+        let pool = self.pool.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::accounts::remove(&conn, &id).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn pairs_list(
+        &self,
+        account: Option<&AccountId>,
+        include_removed: bool,
+    ) -> Result<Vec<Pair>, StateError> {
+        let pool = self.pool.clone();
+        let account = account.copied();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::pairs::list(&conn, account.as_ref(), include_removed).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn conflict_get(&self, id: &ConflictId) -> Result<Option<Conflict>, StateError> {
+        let pool = self.pool.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::conflicts::get(&conn, &id).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn conflict_resolve(
+        &self,
+        id: &ConflictId,
+        resolution: ConflictResolution,
+        resolved_at: Timestamp,
+        note: Option<String>,
+    ) -> Result<(), StateError> {
+        let pool = self.pool.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::conflicts::resolve(&conn, &id, resolution, &resolved_at, note.as_deref())
+                .map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn runs_recent(&self, pair: &PairId, limit: usize) -> Result<Vec<SyncRun>, StateError> {
+        let pool = self.pool.clone();
+        let pair = *pair;
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::sync_runs::recent(&conn, &pair, limit).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn run_get(&self, id: &SyncRunId) -> Result<Option<SyncRun>, StateError> {
+        let pool = self.pool.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::sync_runs::get(&conn, &id).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEvent>, StateError> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::audit::recent(&conn, limit).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn audit_search(
+        &self,
+        from_ts: &Timestamp,
+        to_ts: &Timestamp,
+        level: Option<AuditLevel>,
+        pair: Option<&PairId>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, StateError> {
+        let pool = self.pool.clone();
+        let from_ts = *from_ts;
+        let to_ts = *to_ts;
+        let pair = pair.copied();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::audit::search(&conn, &from_ts, &to_ts, level, pair.as_ref(), limit)
+                .map_err(map_err)
         })
         .await
         .map_err(|e| StateError::Io(format!("join: {e}")))?

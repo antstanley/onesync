@@ -74,6 +74,44 @@ pub fn get(conn: &Connection, id: &PairId) -> Result<Option<Pair>, StateStoreErr
     .map_err(|e| StateStoreError::Sqlite(e.to_string()))
 }
 
+/// List pairs, optionally filtered by account. If `include_removed` is false, soft-deleted
+/// (`status = 'removed'`) pairs are excluded. Ordered by id.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails or rows can't be decoded.
+pub fn list(
+    conn: &Connection,
+    account: Option<&onesync_protocol::id::AccountId>,
+    include_removed: bool,
+) -> Result<Vec<Pair>, StateStoreError> {
+    let mut sql = "SELECT id, account_id, local_path, remote_item_id, remote_path, display_name, \
+                          status, paused, delta_token, errored_reason, created_at, updated_at, \
+                          last_sync_at, conflict_count \
+                   FROM pairs WHERE 1=1"
+        .to_owned();
+    let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(a) = account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(Box::new(a.to_string()));
+    }
+    if !include_removed {
+        sql.push_str(" AND status <> 'removed'");
+    }
+    sql.push_str(" ORDER BY id");
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| StateStoreError::Sqlite(e.to_string()))?;
+
+    let params: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(AsRef::as_ref).collect();
+    let rows = stmt
+        .query_map(params.as_slice(), row_to_pair)
+        .map_err(|e| StateStoreError::Sqlite(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| StateStoreError::Sqlite(e.to_string())))
+        .collect()
+}
+
 /// Fetch all non-removed pairs ordered by id.
 ///
 /// # Errors

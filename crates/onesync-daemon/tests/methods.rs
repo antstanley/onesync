@@ -116,48 +116,130 @@ async fn health_diagnostics() {
     token.trigger();
 }
 
+/// Send a request with custom params and read one response.
+async fn roundtrip_params(
+    sock_path: &std::path::Path,
+    method: &str,
+    params: serde_json::Value,
+) -> JsonRpcResponse {
+    let stream = UnixStream::connect(sock_path)
+        .await
+        .expect("connect to IPC socket");
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let req = JsonRpcRequest::new("1", method, params);
+    let json = serde_json::to_string(&req).expect("serialize");
+    write_half.write_all(json.as_bytes()).await.expect("write");
+    write_half.write_all(b"\n").await.expect("write newline");
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("read response");
+    serde_json::from_str(line.trim()).expect("parse response")
+}
+
 // ── account ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn account_list_returns_not_implemented() {
+async fn account_list_returns_empty_array_on_fresh_store() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(&roundtrip(&sock, "account.list").await, "account.list");
+    let resp = roundtrip(&sock, "account.list").await;
+    match resp {
+        JsonRpcResponse::Ok(ok) => {
+            assert!(ok.result.is_array(), "account.list must return an array");
+            assert_eq!(ok.result.as_array().expect("array").len(), 0);
+        }
+        JsonRpcResponse::Err(e) => unreachable!("expected Ok, got error {e:?}"),
+    }
+    token.trigger();
+}
+
+#[tokio::test]
+async fn account_login_begin_still_returns_not_implemented() {
+    // Deferred until Graph adapter is wired; documented stub.
+    let (token, sock, _tmp) = start_server().await;
+    assert_not_implemented(
+        &roundtrip(&sock, "account.login.begin").await,
+        "account.login.begin",
+    );
     token.trigger();
 }
 
 // ── pair ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn pair_list_returns_not_implemented() {
+async fn pair_list_returns_empty_array_on_fresh_store() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(&roundtrip(&sock, "pair.list").await, "pair.list");
+    let resp = roundtrip(&sock, "pair.list").await;
+    assert!(matches!(resp, JsonRpcResponse::Ok(_)));
+    token.trigger();
+}
+
+#[tokio::test]
+async fn pair_force_sync_still_returns_not_implemented() {
+    let (token, sock, _tmp) = start_server().await;
+    assert_not_implemented(
+        &roundtrip(&sock, "pair.force_sync").await,
+        "pair.force_sync",
+    );
     token.trigger();
 }
 
 // ── conflict ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn conflict_list_returns_not_implemented() {
+async fn conflict_list_returns_empty_array_for_pair_without_conflicts() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(&roundtrip(&sock, "conflict.list").await, "conflict.list");
+    let resp = roundtrip_params(
+        &sock,
+        "conflict.list",
+        serde_json::json!({ "pair": "pair_01J8X7CFGMZG7Y4DC0VA8DZW2H" }),
+    )
+    .await;
+    match resp {
+        JsonRpcResponse::Ok(ok) => {
+            assert!(ok.result.is_array());
+            assert_eq!(ok.result.as_array().expect("array").len(), 0);
+        }
+        JsonRpcResponse::Err(e) => unreachable!("expected Ok, got error {e:?}"),
+    }
     token.trigger();
 }
 
 // ── audit ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn audit_search_returns_not_implemented() {
+async fn audit_search_returns_empty_array_on_fresh_store() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(&roundtrip(&sock, "audit.search").await, "audit.search");
+    let resp = roundtrip_params(
+        &sock,
+        "audit.search",
+        serde_json::json!({
+            "from": "2020-01-01T00:00:00Z",
+            "to": "2030-01-01T00:00:00Z",
+        }),
+    )
+    .await;
+    match resp {
+        JsonRpcResponse::Ok(ok) => {
+            assert!(ok.result.is_array());
+            assert_eq!(ok.result.as_array().expect("array").len(), 0);
+        }
+        JsonRpcResponse::Err(e) => unreachable!("expected Ok, got error {e:?}"),
+    }
     token.trigger();
 }
 
 // ── run ───────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn run_list_returns_not_implemented() {
+async fn run_list_returns_empty_array_on_fresh_store() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(&roundtrip(&sock, "run.list").await, "run.list");
+    let resp = roundtrip_params(
+        &sock,
+        "run.list",
+        serde_json::json!({ "pair": "pair_01J8X7CFGMZG7Y4DC0VA8DZW2H" }),
+    )
+    .await;
+    assert!(matches!(resp, JsonRpcResponse::Ok(_)));
     token.trigger();
 }
 
@@ -179,5 +261,40 @@ async fn service_shutdown_returns_not_implemented() {
         &roundtrip(&sock, "service.shutdown").await,
         "service.shutdown",
     );
+    token.trigger();
+}
+
+// ── config ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn config_get_returns_null_on_fresh_store() {
+    let (token, sock, _tmp) = start_server().await;
+    let resp = roundtrip(&sock, "config.get").await;
+    match resp {
+        JsonRpcResponse::Ok(ok) => assert!(ok.result.is_null()),
+        JsonRpcResponse::Err(e) => unreachable!("expected Ok, got {e:?}"),
+    }
+    token.trigger();
+}
+
+#[tokio::test]
+async fn config_set_then_get_round_trips() {
+    let (token, sock, _tmp) = start_server().await;
+    let set_resp = roundtrip_params(
+        &sock,
+        "config.set",
+        serde_json::json!({ "log_level": "debug", "notify": false }),
+    )
+    .await;
+    assert!(matches!(set_resp, JsonRpcResponse::Ok(_)));
+
+    let get_resp = roundtrip(&sock, "config.get").await;
+    match get_resp {
+        JsonRpcResponse::Ok(ok) => {
+            assert_eq!(ok.result["log_level"], "debug");
+            assert_eq!(ok.result["notify"], false);
+        }
+        JsonRpcResponse::Err(e) => unreachable!("expected Ok, got {e:?}"),
+    }
     token.trigger();
 }

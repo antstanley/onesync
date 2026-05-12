@@ -1,12 +1,13 @@
 //! `conflicts` query helpers.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use onesync_protocol::{
     conflict::Conflict,
     enums::{ConflictResolution, ConflictSide},
     file_side::FileSide,
-    id::PairId,
+    id::{ConflictId, PairId},
+    primitives::Timestamp,
 };
 
 use crate::error::StateStoreError;
@@ -37,6 +38,50 @@ pub fn insert(conn: &Connection, c: &Conflict) -> Result<(), StateStoreError> {
             c.resolved_at.map(|ts| ts.into_inner().to_rfc3339()),
             c.resolution.map(conflict_resolution_to_str),
             c.note.as_deref(),
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| StateStoreError::Sqlite(e.to_string()))
+}
+
+/// Fetch one conflict by id.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails or the row can't be decoded.
+pub fn get(conn: &Connection, id: &ConflictId) -> Result<Option<Conflict>, StateStoreError> {
+    conn.query_row(
+        "SELECT id, pair_id, relative_path, winner, loser_relative_path, \
+                local_side_json, remote_side_json, detected_at, resolved_at, resolution, note \
+         FROM conflicts WHERE id = ?",
+        params![id.to_string()],
+        row_to_conflict,
+    )
+    .optional()
+    .map_err(|e| StateStoreError::Sqlite(e.to_string()))
+}
+
+/// Mark a conflict resolved.
+///
+/// Sets `resolved_at`, `resolution`, and (optionally) `note` on the row.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails.
+pub fn resolve(
+    conn: &Connection,
+    id: &ConflictId,
+    resolution: ConflictResolution,
+    resolved_at: &Timestamp,
+    note: Option<&str>,
+) -> Result<(), StateStoreError> {
+    conn.execute(
+        "UPDATE conflicts \
+         SET resolved_at = ?, resolution = ?, note = COALESCE(?, note) \
+         WHERE id = ?",
+        params![
+            resolved_at.into_inner().to_rfc3339(),
+            conflict_resolution_to_str(resolution),
+            note,
+            id.to_string(),
         ],
     )
     .map(|_| ())
