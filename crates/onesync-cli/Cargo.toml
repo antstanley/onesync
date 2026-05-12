@@ -1,0 +1,26 @@
+[package]
+name = "onesync-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "onesync — operator-facing CLI for the onesync daemon."
+
+[[bin]]
+name = "onesync"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+onesync-protocol = { path = "../onesync-protocol" }
+anyhow        = { workspace = true }
+clap          = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true, features = ["io-util", "net", "process"] }
+ulid          = { workspace = true }
