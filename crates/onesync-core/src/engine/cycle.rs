@@ -26,9 +26,10 @@ use crate::engine::observability::{
 };
 use crate::engine::planner::plan;
 use crate::engine::reconcile::reconcile;
+use crate::engine::retry::backoff_delay;
 use crate::engine::types::{CycleSummary, Decision, EngineError};
 use crate::limits::{CYCLE_PHASE_TIMEOUT_MS, MAX_QUEUE_DEPTH_PER_PAIR};
-use crate::ports::{AuditSink, Clock, GraphError, IdGenerator, LocalFsError, StateStore};
+use crate::ports::{AuditSink, Clock, GraphError, IdGenerator, Jitter, LocalFsError, StateStore};
 use crate::ports::{LocalFs, RemoteDrive};
 
 /// All external dependencies injected into `run_cycle`.
@@ -45,6 +46,8 @@ pub struct EngineDeps<'a, I: IdGenerator> {
     pub ids: &'a I,
     /// Audit sink.
     pub audit: &'a dyn AuditSink,
+    /// Jitter source for backoff delays.
+    pub jitter: &'a dyn Jitter,
     /// Local hostname, used for conflict loser-rename naming.
     pub host: String,
 }
@@ -191,9 +194,36 @@ async fn run_cycle_inner<I: IdGenerator>(
     for op in &op_plan.ops {
         deps.state.op_insert(op).await?;
 
-        if let Err(e) = execute(&executor_ctx, op, &pair).await {
+        // Retry loop with exponential backoff + jitter.
+        let mut attempt: u32 = 0;
+        let op_result = loop {
+            match execute(&executor_ctx, op, &pair).await {
+                Ok(()) => break Ok(()),
+                Err(e) => {
+                    // Non-recoverable errors stop immediately.
+                    if non_recoverable_reason(&e).is_some() {
+                        break Err(e);
+                    }
+                    // Check if there are retries remaining.
+                    match backoff_delay(attempt, deps.jitter.next()) {
+                        None => break Err(e),
+                        Some(delay) => {
+                            // Transition op to Backoff status so state reflects the delay.
+                            use onesync_protocol::enums::FileOpStatus;
+                            let _ = deps
+                                .state
+                                .op_update_status(&op.id, FileOpStatus::Backoff)
+                                .await;
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                        }
+                    }
+                }
+            }
+        };
+
+        if let Err(e) = op_result {
             had_failure = true;
-            // Categorise non-recoverable errors and transition pair.
             if let Some(reason) = non_recoverable_reason(&e) {
                 transition_pair_errored(deps, &pair, reason).await?;
                 break;

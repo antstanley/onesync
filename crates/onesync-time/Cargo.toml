@@ -12,6 +12,7 @@ workspace = true
 onesync-core     = { path = "../onesync-core" }
 onesync-protocol = { path = "../onesync-protocol" }
 chrono           = { workspace = true }
+getrandom        = { workspace = true }
 ulid             = { workspace = true }
 
 [dev-dependencies]
