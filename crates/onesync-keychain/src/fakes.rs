@@ -1,6 +1,6 @@
 //! In-memory `TokenVault` for tests.
 
-#![cfg(test)]
+#![cfg(any(test, feature = "fakes"))]
 #![allow(clippy::expect_used)]
 // LINT: test-double surface; mutex-poison expects are standard.
 

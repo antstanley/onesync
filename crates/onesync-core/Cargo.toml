@@ -18,6 +18,10 @@ thiserror        = { workspace = true }
 tokio            = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
-ulid     = { workspace = true }
-blake3   = { workspace = true }
+proptest         = { workspace = true }
+ulid             = { workspace = true }
+blake3           = { workspace = true }
+onesync-state    = { path = "../onesync-state",    features = ["fakes"] }
+onesync-fs-local = { path = "../onesync-fs-local", features = ["fakes"] }
+onesync-keychain = { path = "../onesync-keychain", features = ["fakes"] }
+onesync-time     = { path = "../onesync-time" }

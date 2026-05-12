@@ -1,6 +1,6 @@
 //! In-memory `StateStore` for engine tests.
 
-#![cfg(test)]
+#![cfg(any(test, feature = "fakes"))]
 #![allow(clippy::expect_used)]
 // LINT: this module is the test-double surface for the StateStore port;
 //       mutex-poison expects are the standard pattern.

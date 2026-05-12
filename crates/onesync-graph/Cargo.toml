@@ -11,6 +11,9 @@ description = "Microsoft Graph adapter implementing the RemoteDrive port for one
 [lints]
 workspace = true
 
+[features]
+fakes = []
+
 [dependencies]
 onesync-core    = { path = "../onesync-core" }
 onesync-protocol = { path = "../onesync-protocol" }

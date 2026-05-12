@@ -9,20 +9,17 @@
 //! - `download` → returns stored bytes or `NotFound`.
 //! - `rename`/`delete`/`mkdir` → mutate the map.
 
-#[cfg(test)]
+#![cfg(any(test, feature = "fakes"))]
+
 use std::collections::HashMap;
 
-#[cfg(test)]
 use bytes::Bytes;
 
-#[cfg(test)]
 use crate::items::{FileFacet, FileHashes, FolderFacet, RemoteItem};
 
-#[cfg(test)]
 use crate::error::GraphInternalError;
 
 /// An item stored in the `FakeRemoteDrive`.
-#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct FakeItem {
     /// The graph metadata for the item.
@@ -34,13 +31,11 @@ pub struct FakeItem {
 }
 
 /// In-memory implementation of `RemoteDrive` semantics.
-#[cfg(test)]
 pub struct FakeRemoteDrive {
     items: HashMap<String, FakeItem>,
     generation: u64,
 }
 
-#[cfg(test)]
 impl FakeRemoteDrive {
     /// Create an empty fake drive.
     #[must_use]
@@ -76,7 +71,7 @@ impl FakeRemoteDrive {
         (items, new_cursor)
     }
 
-    fn bump(&mut self) -> u64 {
+    const fn bump(&mut self) -> u64 {
         self.generation += 1;
         self.generation
     }
@@ -156,7 +151,7 @@ impl FakeRemoteDrive {
             })?;
         let new_gen = self.generation + 1;
         self.generation = new_gen;
-        fi.meta.name = new_name.to_owned();
+        new_name.clone_into(&mut fi.meta.name);
         fi.generation = new_gen;
         Ok(fi.meta.clone())
     }
@@ -203,7 +198,6 @@ impl FakeRemoteDrive {
     }
 }
 
-#[cfg(test)]
 impl Default for FakeRemoteDrive {
     fn default() -> Self {
         Self::new()
@@ -213,7 +207,6 @@ impl Default for FakeRemoteDrive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     #[test]
     fn upload_then_download_round_trip() {

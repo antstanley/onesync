@@ -1,6 +1,6 @@
 //! In-memory `LocalFs` implementation for tests.
 
-#![cfg(test)]
+#![cfg(any(test, feature = "fakes"))]
 #![allow(clippy::expect_used)]
 // LINT: this is a test-double surface; mutex-poison expects are the standard pattern.
 #![allow(clippy::disallowed_methods)]
