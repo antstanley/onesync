@@ -27,3 +27,5 @@ ulid             = { workspace = true }
 tempfile         = { workspace = true }
 proptest         = { workspace = true }
 onesync-time     = { path = "../onesync-time" }
+onesync-fs-local = { path = "../onesync-fs-local" }
+blake3           = { workspace = true }

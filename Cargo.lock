@@ -1187,8 +1187,10 @@ name = "onesync-state"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "onesync-core",
+ "onesync-fs-local",
  "onesync-protocol",
  "onesync-time",
  "proptest",
