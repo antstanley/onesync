@@ -267,8 +267,9 @@ are a latency optimisation only.
 
 - The Microsoft identity platform's `consumers + organizations` authority will continue to
   unify both account types behind one OAuth flow.
-- `/me/drive` is the right endpoint for both flavours; Business users who want SharePoint
-  document libraries are out of scope and are not served by `/me/drive`.
+- `/me/drive` is the right endpoint for both flavours; SharePoint document libraries via
+  `/sites/{site}/drives/{drive}` are scoped for a future milestone (see Decision:
+  *SharePoint document libraries*).
 - Graph's documented small-upload limit of 4 MiB is stable enough to bake into a `const`.
   Microsoft has raised this in the past; we re-check at major-version bumps.
 
@@ -284,14 +285,25 @@ are a latency optimisation only.
   reproducible across macOS versions.
 - *Refresh tokens in keychain only.* **Never persisted to the SQLite database.** Compromising
   the state file does not yield credentials.
+- *Azure AD client registration.* **The user registers their own Azure AD app; onesync does
+  not ship a project-owned multi-tenant client ID.** The install docs walk the user through
+  the registration form, listing the redirect URI (`http://localhost:<port>/callback`), the
+  required delegated scopes (`Files.ReadWrite.All offline_access User.Read`), and the
+  supported-account-types selector. Distributes the per-app rate limits across users and
+  removes a project-level tenant-ownership liability. Cross-referenced from
+  [`00-overview.md`](00-overview.md).
+- *Webhook receiver via Cloudflare Tunnel.* **The `/subscriptions` callback URL is terminated
+  by a `cloudflared` tunnel the operator runs; webhooks are opt-in and off by default.** The
+  install docs include a sample `cloudflared` config; the daemon exposes the receiver on a
+  local port and the tunnel maps a stable HTTPS URL to it. Polling via `/delta` remains the
+  always-on fallback so a flaky tunnel does not break correctness, only latency.
+- *SharePoint document libraries.* **In scope for a future milestone (M9+).** The engine and
+  Graph adapter route through `/me/drive` today; SharePoint requires resolving a target via
+  `/sites/{site}/drives/{drive}` plus a selector syntax in `pair add` (e.g.
+  `--site contoso.sharepoint.com --library Documents`). The schema does not need new entities
+  because a SharePoint drive maps to a `DriveId` plus a `DriveItemId`; only the Graph adapter
+  and the `pair add` flow need to learn the resolution step.
 
 **Open questions**
 
-- *Ship a public client id vs require the user to register one.* Pre-registered IDs make
-  onboarding instant but mean the project owns an Azure tenant and is rate-limited by it; user
-  registrations push setup burden but distribute that limit.
-- *Webhook receiver story.* Behind a NAT, a callback URL needs a tunnel (ngrok, Cloudflare
-  Tunnel) or a hosted relay. Until that story is resolved, webhooks remain off by default.
-- *Drive items outside `/me/drive`.* SharePoint document libraries via
-  `/sites/{site}/drives/{drive}` are a meaningful Business feature but require selector
-  syntax in the pair-registration command. Currently out of scope.
+- (None at this stage.)

@@ -109,7 +109,7 @@ in the same change.
 
 | Constant | Value | Units | Notes |
 |---|---|---|---|
-| `MAX_FILE_SIZE_BYTES` | 50 * GiB | bytes | Hard cap on a single file. |
+| `MAX_FILE_SIZE_BYTES` | 10 * GiB | bytes | Hard cap on a single file. |
 | `MAX_PATH_BYTES` | 1024 | bytes | UTF-8 absolute path length cap. |
 | `HASH_BLOCK_BYTES` | 1 * MiB | bytes | BLAKE3 streaming block size. |
 | `READ_INLINE_MAX` | 64 * KiB | bytes | Below this, reads stay on the Tokio reactor. |

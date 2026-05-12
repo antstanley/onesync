@@ -351,13 +351,23 @@ Schema-level indexes that back these queries are documented in
   cycle and become a normal `Clean` entry; the original path resumes its own lifecycle.
 - *Append-only SyncRun history.* **Runs are never updated after they finish.** Pruning is
   governed by `RUN_HISTORY_RETENTION_DAYS`; mutation would lose audit value.
+- *Symbolic link policy.* **Symlinks are skipped during scan and watch with a per-pair
+  `local.symlink.skipped` audit event.** A future opt-in shallow-link mode is left for a later
+  milestone; the schema is shaped so a `link_target` field can be added to `FileEntry` without
+  a breaking migration. See [`05-local-adapter.md`](05-local-adapter.md) for the scanner-level
+  detail.
+- *Case-insensitive name collisions.* **OneDrive's stored name wins the canonical path; the
+  local-side file that would otherwise collide on a case-insensitive comparison is renamed with
+  a `(case-collision-<short-hash>).ext` suffix and synced up as a new file.** This applies on
+  case-sensitive APFS volumes where the local side can legitimately hold both `Report.pdf` and
+  `report.pdf`; on case-insensitive volumes (the default) the collision cannot occur. The
+  renamed loser flows through the same pipeline as any other rename — it appears in
+  `onesync conflicts list` for review, then becomes a normal `Clean` entry on the next cycle.
+  This decision subsumes the case-sensitive APFS open question previously tracked in
+  [`05-local-adapter.md`](05-local-adapter.md).
 
 **Open questions**
 
-- *Symbolic link policy.* Symlinks are currently skipped with a warning. Whether to add an
-  opt-in shallow-link sync mode is open. Tracked here so the schema can grow a `link_target`
-  field without disruption.
-- *Case-insensitive name collisions.* OneDrive treats `Report.pdf` and `report.pdf` as the same
-  file; APFS (case-insensitive by default) also collapses them. A case-sensitive APFS volume
-  would let the local side hold both and would need a collision-handling rule. No such rule
-  is currently defined.
+- *Opt-in shallow symlink sync.* The current skip-with-warning policy is final for MVP; an
+  opt-in mode that records `link_target` and syncs it as a string payload remains a possible
+  future feature. No work is committed.

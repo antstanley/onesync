@@ -139,7 +139,7 @@ does that one job well.
 | Conflict policy | Keep-both, rename loser | Newer mtime wins canonical name; loser becomes `name (conflict YYYY-MM-DDTHH-MM-SSZ from <host>).ext`. |
 | Service surface | Per-user LaunchAgent + Unix-socket JSON-RPC 2.0 | No network ports opened. CLI is sole client; protocol is documented and stable. |
 | Authentication | MSAL public-client OAuth2 with PKCE | Refresh tokens stored in macOS Keychain, never on disk. |
-| File-size cap | `MAX_FILE_SIZE_BYTES` (50 GiB) | Larger files are rejected with a structured error and surfaced in CLI status. |
+| File-size cap | `MAX_FILE_SIZE_BYTES` (10 GiB) | Larger files are rejected with a structured error and surfaced in CLI status. |
 | Determinism | `Clock` and `IdGenerator` are ports | Tests inject fakes; production uses `SystemClock` and `UlidGenerator`. |
 
 ---
@@ -151,8 +151,9 @@ does that one job well.
 - The user runs macOS 13 or newer with the default APFS filesystem; case-insensitive comparison
   is the default but case-preserving behaviour must be retained.
 - The user has a working Microsoft account (personal or work) with sufficient OneDrive storage.
-- The user can register an Azure AD application or accepts the project-shipped public client ID
-  with multi-tenant + personal account support.
+- The user has registered their own Azure AD application (see Decision: *Azure AD client
+  registration*); the install docs walk them through the multi-tenant + personal-account
+  registration form.
 - Network is available enough of the time that polling and webhook fallback are viable.
 - The user's home directory and the chosen local folder live on the same APFS volume; cross-volume
   sync is permitted but renames may decompose into copy+delete.
@@ -171,14 +172,22 @@ does that one job well.
 - *CLI ↔ daemon IPC.* **Unix domain socket with line-delimited JSON-RPC 2.0 framing.** No
   network exposure, fast, easy to fake in tests; full method list in
   [`07-cli-and-ipc.md`](07-cli-and-ipc.md).
+- *Azure AD client registration.* **The user registers their own Azure AD app; onesync does not
+  ship a project-owned multi-tenant client ID.** Pushes onboarding friction up but distributes
+  the per-app rate limits across users and removes a project-level liability (tenant ownership,
+  app review). See also [`04-onedrive-adapter.md`](04-onedrive-adapter.md) for the registration
+  parameters the install docs ask for.
+- *Distribution channel.* **Two paths: a Homebrew formula and a `curl | bash` installer that
+  pulls a notarised binary from the GitHub Release.** Homebrew gives auto-update and is the
+  recommended path; the curl-bash route covers users who do not run Homebrew. Both ship
+  notarised + stapled binaries so Gatekeeper does not prompt.
+- *Large-file ceiling lowered to 10 GiB.* **`MAX_FILE_SIZE_BYTES = 10 * GIB`.** We have no
+  performance data on local BLAKE3 hashing + Graph upload-session resume above this range; the
+  earlier 50 GiB figure was a conservative guess. OneDrive accepts up to 250 GiB and the
+  adapter is not the bottleneck — raising the cap is gated on observed soak-test numbers.
 
 **Open questions**
 
-- *Pre-built Azure AD application.* Does the project ship a public client ID for the default
-  install, or does each user register their own? Affects onboarding friction versus operator
-  control. Tracked for resolution before first release.
-- *macOS notarisation.* Distribution channel (Homebrew formula, signed `.pkg`, or both) is
-  undecided. Notarisation is required to avoid Gatekeeper prompts.
-- *Large-file ceiling.* `MAX_FILE_SIZE_BYTES` is set to 50 GiB conservatively; OneDrive supports
-  up to 250 GiB via upload sessions. Raising the cap requires evidence that the local hashing
-  and resume logic perform acceptably at scale.
+- *Soak-test data for raising the file-size cap.* The 10 GiB cap is intentionally conservative.
+  Lifting it to 50 GiB or beyond is gated on real data from hashing throughput and resumable
+  upload behaviour on representative networks.

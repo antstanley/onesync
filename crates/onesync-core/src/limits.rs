@@ -43,7 +43,7 @@ pub const CONFLICT_RENAME_RETRIES: u32 = 8;
 // --- Filesystem ---
 
 /// Hard cap on a single synced file in bytes.
-pub const MAX_FILE_SIZE_BYTES: u64 = 50 * GIB;
+pub const MAX_FILE_SIZE_BYTES: u64 = 10 * GIB;
 /// Maximum UTF-8 absolute path length in bytes.
 pub const MAX_PATH_BYTES: usize = 1_024;
 /// BLAKE3 streaming block size in bytes.
@@ -125,7 +125,7 @@ mod tests {
         // Cross-check a representative sample against docs/spec/09-development-guidelines.md.
         assert_eq!(MAX_PAIRS_PER_INSTANCE, 16);
         assert_eq!(MAX_QUEUE_DEPTH_PER_PAIR, 4096);
-        assert_eq!(MAX_FILE_SIZE_BYTES, 50 * GIB);
+        assert_eq!(MAX_FILE_SIZE_BYTES, 10 * GIB);
         assert_eq!(GRAPH_SMALL_UPLOAD_MAX_BYTES, 4 * MIB);
         assert_eq!(SESSION_CHUNK_BYTES % (320 * KIB), 0);
         assert_eq!(IPC_FRAME_MAX_BYTES, MIB);

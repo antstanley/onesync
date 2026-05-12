@@ -330,11 +330,16 @@ These are persisted as `AuditEvent`s and streamed to the daemon's structured log
 - *Equality is `(kind, size, hash)`; mtime is metadata.* **mtime is never load-bearing for
   equality.** Some editors zero mtime, some preserve it across copies; only content equality
   is reliable.
+- *Webhook-driven remote change detection.* **Cloudflare Tunnel terminates the Graph
+  `/subscriptions` callback URL; webhooks are opt-in and off by default.** Operators run
+  `cloudflared` against a config the install docs ship and toggle `webhook_enabled` on the
+  pair. Until enabled, the existing `/delta` polling path is the always-on fallback; no
+  remote-change correctness depends on the webhook arriving. Receiver implementation details
+  live in [`04-onedrive-adapter.md`](04-onedrive-adapter.md).
 
 **Open questions**
 
-- *Webhook-driven remote change detection.* MSGraph supports `/subscriptions` against
-  `driveItem`. The engine currently polls; the webhook path is sketched but the receiver URL
-  story (local tunnel? skip on locked-down networks?) is unresolved.
-- *Adaptive `DELTA_POLL_INTERVAL_MS`.* Current behaviour doubles under throttling; we have
-  no data yet on whether to also tighten the interval when local change rate is high.
+- *Adaptive `DELTA_POLL_INTERVAL_MS`.* Current behaviour doubles under throttling; whether to
+  also tighten the interval when local change rate is high is deferred until we have soak-test
+  data on how editors actually distribute writes across a working session. No work committed
+  until the data exists.
