@@ -13,6 +13,7 @@ onesync-core     = { path = "../onesync-core" }
 onesync-protocol = { path = "../onesync-protocol" }
 async-trait      = { workspace = true }
 blake3           = { workspace = true }
+chrono           = { workspace = true }
 fs2              = { workspace = true }
 notify           = { workspace = true }
 tempfile         = { workspace = true }
@@ -20,5 +21,4 @@ thiserror        = { workspace = true }
 tokio            = { workspace = true }
 
 [dev-dependencies]
-chrono           = { workspace = true }
 proptest         = { workspace = true }
