@@ -44,14 +44,39 @@ pub enum LocalFsError {
     Io(String),
 }
 
-/// Placeholder stream type for `FSEvents` output; concrete implementation lands in `onesync-fs-local` (M2).
-pub struct LocalEventStream;
-/// Placeholder stream type for directory scans; concrete implementation lands in `onesync-fs-local` (M2).
-pub struct LocalScanStream;
-/// Placeholder stream type for file reads; concrete implementation lands in `onesync-fs-local` (M2).
-pub struct LocalReadStream;
-/// Placeholder stream type for file writes; concrete implementation lands in `onesync-fs-local` (M2).
-pub struct LocalWriteStream;
+/// Stream of `(absolute_path, FileSide)` snapshots from a recursive scan.
+pub struct LocalScanStream(pub Vec<(std::path::PathBuf, FileSide)>);
+
+/// Byte buffer of a file's contents (eager; streaming `Read` comes later).
+pub struct LocalReadStream(pub Vec<u8>);
+
+/// Byte buffer to write to a target (eager; streaming `Write` comes later).
+pub struct LocalWriteStream(pub Vec<u8>);
+
+/// Receiver for filesystem events under a watched root.
+pub struct LocalEventStream(pub tokio::sync::mpsc::Receiver<LocalEventDto>);
+
+/// A filesystem event observed by [`LocalFs::watch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalEventDto {
+    /// File or directory appeared.
+    Created(std::path::PathBuf),
+    /// File or directory was modified.
+    Modified(std::path::PathBuf),
+    /// File or directory was deleted.
+    Deleted(std::path::PathBuf),
+    /// File or directory was renamed.
+    Renamed {
+        /// Old path (before rename).
+        from: std::path::PathBuf,
+        /// New path (after rename).
+        to: std::path::PathBuf,
+    },
+    /// Watcher buffer overflowed; consumer should run a full re-scan.
+    Overflow,
+    /// Watched volume was unmounted; the stream ends after this event.
+    Unmounted,
+}
 
 /// The macOS filesystem surface the engine drives.
 #[async_trait]
