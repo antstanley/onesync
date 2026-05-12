@@ -19,3 +19,4 @@ tokio            = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+ulid     = { workspace = true }
