@@ -11,6 +11,7 @@ use std::time::Duration;
 use onesync_protocol::{
     enums::{FileSyncState, PairStatus, RunOutcome, RunTrigger},
     file_entry::FileEntry,
+    file_side::FileSide,
     id::{PairId, SyncRunTag},
     pair::Pair,
     path::RelPath,
@@ -53,7 +54,6 @@ pub struct EngineDeps<'a, I: IdGenerator> {
 /// # Errors
 ///
 /// Returns an [`EngineError`] if any phase encounters a fatal error.
-#[allow(clippy::too_many_lines)]
 pub async fn run_cycle<I: IdGenerator>(
     deps: &EngineDeps<'_, I>,
     pair_id: PairId,
@@ -85,10 +85,27 @@ pub async fn run_cycle<I: IdGenerator>(
         trigger_name(trigger),
     );
 
+    run_cycle_inner(deps, pair, run_id, trigger, started_at).await
+}
+
+/// Inner cycle body, entered either directly from `run_cycle` or after a
+/// `ResyncRequired` reset. Separated so that the resync restart can call it
+/// without unbounded recursion.
+#[allow(clippy::too_many_lines)]
+async fn run_cycle_inner<I: IdGenerator>(
+    deps: &EngineDeps<'_, I>,
+    pair: Pair,
+    run_id: onesync_protocol::id::SyncRunId,
+    trigger: RunTrigger,
+    started_at: Timestamp,
+) -> Result<CycleSummary, EngineError> {
+    let pair_id = pair.id;
+    let full_scan = pair.delta_token.is_none();
+
     // ── Phase 2: local scan delta (or full scan for initial sync) ──────────
     let phase2_start = std::time::Instant::now();
     let local_entries = run_phase("local_scan", CYCLE_PHASE_TIMEOUT_MS, async {
-        collect_local_entries(deps, &pair, pair.delta_token.is_none()).await
+        collect_local_entries(deps, &pair, full_scan).await
     })
     .await?;
     emit_phase_timing(
@@ -102,10 +119,28 @@ pub async fn run_cycle<I: IdGenerator>(
 
     // ── Phase 3: remote scan delta ─────────────────────────────────────────
     let phase3_start = std::time::Instant::now();
-    let (remote_entries, _new_cursor) = run_phase("remote_scan", CYCLE_PHASE_TIMEOUT_MS, async {
-        collect_remote_entries(deps, &pair).await
-    })
-    .await?;
+    // On ResyncRequired, clear the cursor and re-collect; any second failure propagates.
+    let remote_result = run_phase(
+        "remote_scan",
+        CYCLE_PHASE_TIMEOUT_MS,
+        collect_remote_entries(deps, &pair),
+    )
+    .await;
+    let (remote_entries, _new_cursor) = match remote_result {
+        Ok(v) => v,
+        Err(EngineError::Graph(GraphError::ResyncRequired)) => {
+            // The delta cursor is too old — clear it and transition to Initializing,
+            // then re-run both scans as a full initial sync.
+            let mut reset_pair = pair.clone();
+            reset_pair.delta_token = None;
+            reset_pair.status = PairStatus::Initializing;
+            reset_pair.updated_at = deps.clock.now();
+            deps.state.pair_upsert(&reset_pair).await?;
+            // Second ResyncRequired propagates as a hard error.
+            collect_remote_entries(deps, &reset_pair).await?
+        }
+        Err(other) => return Err(other),
+    };
     emit_phase_timing(
         deps.audit,
         deps.clock,
@@ -255,25 +290,50 @@ where
         .map_err(|_| EngineError::PhaseTimeout { phase })?
 }
 
-/// Collect local path → `FileSide` snapshot from the state store.
-/// On initial sync (no cursor), we scan from the local fs.
+/// Collect local path → `FileSide` snapshot.
+///
+/// For an incremental cycle (`full_scan = false`), reads dirty entries from
+/// the state store. For an initial sync or rescan (`full_scan = true`), calls
+/// `LocalFs::scan` to walk the entire local folder.
 async fn collect_local_entries<I: IdGenerator>(
     deps: &EngineDeps<'_, I>,
     pair: &Pair,
-    _full_scan: bool,
-) -> Result<Vec<(RelPath, onesync_protocol::file_side::FileSide)>, EngineError> {
-    // For delta cycles: return dirty entries from the state store.
-    // For initial sync: scan from the local fs.
-    // This simplified implementation reads dirty entries for both cases.
-    let dirty = deps
-        .state
-        .file_entries_dirty(&pair.id, MAX_QUEUE_DEPTH_PER_PAIR)
-        .await?;
-    let entries: Vec<(RelPath, onesync_protocol::file_side::FileSide)> = dirty
-        .into_iter()
-        .filter_map(|e| e.local.map(|l| (e.relative_path, l)))
-        .collect();
-    Ok(entries)
+    full_scan: bool,
+) -> Result<Vec<(RelPath, FileSide)>, EngineError> {
+    if full_scan {
+        // Walk the entire local folder.
+        let stream = deps.local.scan(&pair.local_path).await?;
+        let root = pair.local_path.as_str();
+        let entries = stream
+            .0
+            .into_iter()
+            .filter_map(|(abs, side)| {
+                // Strip the root prefix to get a relative path.
+                let abs_str = abs.to_string_lossy();
+                let rel_str = abs_str
+                    .strip_prefix(root)
+                    .map(|s| s.trim_start_matches('/'))?;
+                if rel_str.is_empty() {
+                    // Skip the root directory itself.
+                    return None;
+                }
+                let rel: RelPath = rel_str.parse().ok()?;
+                Some((rel, side))
+            })
+            .collect();
+        Ok(entries)
+    } else {
+        // Incremental: return dirty entries from the state store.
+        let dirty = deps
+            .state
+            .file_entries_dirty(&pair.id, MAX_QUEUE_DEPTH_PER_PAIR)
+            .await?;
+        let entries = dirty
+            .into_iter()
+            .filter_map(|e| e.local.map(|l| (e.relative_path, l)))
+            .collect();
+        Ok(entries)
+    }
 }
 
 /// Collect remote delta items. Returns (items, `new_cursor`).
