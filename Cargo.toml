@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 edition = "2024"
@@ -43,3 +43,5 @@ tempfile      = "3"
 fs2           = "0.4"
 notify        = "6"
 blake3        = "1"
+clap          = { version = "4", features = ["derive"] }
+anyhow        = "1"

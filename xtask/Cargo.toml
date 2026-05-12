@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+onesync-state = { path = "../crates/onesync-state" }
+rusqlite      = { workspace = true }
+clap          = { workspace = true }
+anyhow        = { workspace = true }
