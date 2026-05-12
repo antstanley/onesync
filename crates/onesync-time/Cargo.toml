@@ -1,0 +1,18 @@
+[package]
+name = "onesync-time"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+onesync-core     = { path = "../onesync-core" }
+onesync-protocol = { path = "../onesync-protocol" }
+chrono           = { workspace = true }
+ulid             = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
