@@ -35,3 +35,11 @@ jsonschema    = { version = "0.18", features = ["draft202012"] }
 async-trait   = "0.1"
 tokio         = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 proptest      = "1"
+rusqlite      = { version = "0.38", features = ["bundled", "chrono", "serde_json"] }
+r2d2          = "0.8"
+r2d2_sqlite   = "0.32"
+refinery      = { version = "0.9", features = ["rusqlite"] }
+tempfile      = "3"
+fs2           = "0.4"
+notify        = "6"
+blake3        = "1"
