@@ -1,17 +1,105 @@
 //! `SQLite` connection pool and PRAGMAs.
 
 use std::path::Path;
+use std::path::PathBuf;
 
-/// Placeholder for the connection pool type; Task 3 implements it.
-#[derive(Debug)]
-pub struct ConnectionPool;
+use r2d2::{Pool, PooledConnection};
+use r2d2_sqlite::SqliteConnectionManager;
 
-/// Placeholder for the open-and-migrate entry point; Task 3 implements it.
+use onesync_core::limits::STATE_POOL_SIZE;
+
+use crate::error::StateStoreError;
+
+/// Pool of `SQLite` connections plus the database file path.
+#[derive(Clone, Debug)]
+pub struct ConnectionPool {
+    inner: Pool<SqliteConnectionManager>,
+    path: PathBuf,
+}
+
+impl ConnectionPool {
+    /// Borrow a connection from the pool.
+    ///
+    /// # Errors
+    /// Returns an error if no connection is available within the pool's timeout.
+    pub fn get(&self) -> Result<PooledConnection<SqliteConnectionManager>, StateStoreError> {
+        self.inner
+            .get()
+            .map_err(|e| StateStoreError::Sqlite(format!("pool: {e}")))
+    }
+
+    /// The on-disk path of the database.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Open (or create) the database at `path`, apply all pending migrations,
+/// set the standard PRAGMAs, and return a connection pool.
 ///
 /// # Errors
-/// Returns an error when the database cannot be opened or migrated.
-#[allow(clippy::unimplemented)]
-// LINT: filled in by M2 Task 3 (Connection pool + PRAGMAs).
-pub fn open(_path: &Path) -> Result<ConnectionPool, crate::error::StateStoreError> {
-    unimplemented!("M2 Task 3 implements this")
+/// Returns `StateStoreError::Sqlite` for I/O / pool failures and
+/// `StateStoreError::Migration` for migration failures.
+pub fn open(path: &Path) -> Result<ConnectionPool, StateStoreError> {
+    let manager = SqliteConnectionManager::file(path).with_init(|conn| {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "busy_timeout", 5_000_i64)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        Ok(())
+    });
+
+    let pool = Pool::builder()
+        .max_size(u32::try_from(STATE_POOL_SIZE).unwrap_or(4))
+        .build(manager)
+        .map_err(|e| StateStoreError::Sqlite(format!("build pool: {e}")))?;
+
+    // Apply migrations on a single connection before publishing the pool.
+    let mut conn = pool
+        .get()
+        .map_err(|e| StateStoreError::Sqlite(format!("migration conn: {e}")))?;
+    crate::migrations::run(&mut conn)?;
+
+    Ok(ConnectionPool {
+        inner: pool,
+        path: path.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn open_creates_file_and_sets_wal_mode() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db_path = tmp.path().join("test.sqlite");
+        let pool = open(&db_path).expect("open");
+        assert!(db_path.exists(), "db file should be created");
+
+        let conn = pool.get().expect("get conn");
+        let mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("pragma");
+        assert_eq!(mode, "wal");
+    }
+
+    #[test]
+    fn open_is_idempotent_across_reopens() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db_path = tmp.path().join("test.sqlite");
+
+        let pool1 = open(&db_path).expect("first open");
+        drop(pool1);
+        let _pool2 = open(&db_path).expect("second open");
+    }
+
+    #[test]
+    fn open_rejects_a_directory_path() {
+        let tmp = TempDir::new().expect("tmpdir");
+        assert!(open(tmp.path()).is_err());
+    }
 }
