@@ -17,4 +17,4 @@ pub use local_fs::{
 };
 pub use remote_drive::{GraphError, RemoteDrive};
 pub use state::{StateError, StateStore};
-pub use token_vault::{TokenVault, VaultError};
+pub use token_vault::{RefreshToken, TokenVault, VaultError};

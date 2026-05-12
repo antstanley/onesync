@@ -15,6 +15,7 @@ pub enum VaultError {
 }
 
 /// An OAuth refresh token, opaque to the engine.
+#[derive(Debug)]
 pub struct RefreshToken(
     /// The token string itself, as issued by Microsoft Identity.
     pub String,

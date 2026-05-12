@@ -20,3 +20,4 @@ security-framework = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ulid     = { workspace = true }
