@@ -3,9 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::cli::{
-    AccountCmd, Cli, Command, ConfigCmd, ConflictsCmd, LogsCmd, PairCmd, ServiceCmd, StateCmd,
-};
+use crate::cli::{AccountCmd, Cli, Command, ConfigCmd, ConflictsCmd, LogsCmd, PairCmd, StateCmd};
 use crate::error::CliError;
 use crate::output::{OutputCfg, emit_value};
 use crate::rpc::{RpcClient, default_socket_path};
@@ -32,7 +30,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Logs { cmd } => logs(&socket, cfg, cmd).await,
         Command::State { cmd } => state(&socket, cfg, cmd).await,
         Command::Config { cmd } => config(&socket, cfg, cmd).await,
-        Command::Service { cmd } => service(cfg, cmd),
+        Command::Service { cmd } => crate::service::run(cfg, cmd).await,
     }
 }
 
@@ -258,11 +256,4 @@ async fn config(socket: &std::path::Path, cfg: OutputCfg, cmd: ConfigCmd) -> Res
         }
     };
     emit_value(cfg, &v)
-}
-
-fn service(_cfg: OutputCfg, _cmd: ServiceCmd) -> Result<(), CliError> {
-    // M7 lifecycle implementations replace this stub.
-    Err(CliError::Generic(
-        "service subcommands are implemented in M7 (installation lifecycle)".into(),
-    ))
 }

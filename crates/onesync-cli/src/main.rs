@@ -12,6 +12,7 @@ mod error;
 mod exit_codes;
 mod output;
 mod rpc;
+mod service;
 
 use cli::Cli;
 
