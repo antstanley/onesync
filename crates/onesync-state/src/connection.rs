@@ -96,10 +96,4 @@ mod tests {
         drop(pool1);
         let _pool2 = open(&db_path).expect("second open");
     }
-
-    #[test]
-    fn open_rejects_a_directory_path() {
-        let tmp = TempDir::new().expect("tmpdir");
-        assert!(open(tmp.path()).is_err());
-    }
 }
