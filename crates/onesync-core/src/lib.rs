@@ -6,5 +6,6 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod engine;
 pub mod limits;
 pub mod ports;
