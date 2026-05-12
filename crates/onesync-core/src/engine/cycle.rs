@@ -1,524 +1,234 @@
-//! Six-phase sync cycle driver.
+//! `run_cycle`: the six-phase sync-cycle driver.
 //!
-//! Implements `run_cycle` which orchestrates local scan, remote delta, reconcile,
-//! plan, and execute phases for a single pair in one atomic sweep.
-//!
-//! See [`docs/spec/03-sync-engine.md`](../../../../docs/spec/03-sync-engine.md) §Cycle structure.
-
-use std::collections::BTreeSet;
-use std::time::Duration;
+//! Phases:
+//! 1. **Delta** — fetch remote changes since the last cursor.
+//! 2. **Events** — drain pending local filesystem events.
+//! 3. **Reconcile** — pure: for each changed path produce a [`Decision`].
+//! 4. **Plan** — convert decisions into ordered [`FileOp`]s.
+//! 5. **Execute** — drive each op through the port layer.
+//! 6. **Record** — persist the `SyncRun` and emit audit events.
 
 use onesync_protocol::{
-    enums::{FileSyncState, PairStatus, RunOutcome, RunTrigger},
-    file_entry::FileEntry,
-    file_side::FileSide,
-    id::{PairId, SyncRunTag},
-    pair::Pair,
+    enums::{FileOpStatus, RunOutcome, RunTrigger},
+    file_op::FileOp,
+    id::{AuditEventId, SyncRunId},
     path::RelPath,
-    primitives::Timestamp,
+    primitives::DeltaCursor,
     sync_run::SyncRun,
 };
-use tokio::time::timeout;
 
-use crate::engine::executor::{ExecutorCtx, execute};
-use crate::engine::observability::{
-    emit_cycle_finish, emit_cycle_start, emit_pair_errored, emit_phase_timing,
+use crate::{
+    engine::{
+        executor::{execute, is_retriable},
+        observability::{cycle_finished, cycle_started, op_failed},
+        planner::plan,
+        reconcile::reconcile_one,
+        retry::{RetryDecision, retry_decision},
+        types::{CycleSummary, DecisionKind, EngineError},
+    },
+    ports::{AuditSink, Clock, IdGenerator, LocalFs, RemoteDrive, StateStore},
 };
-use crate::engine::planner::plan;
-use crate::engine::reconcile::reconcile;
-use crate::engine::retry::backoff_delay;
-use crate::engine::types::{CycleSummary, Decision, EngineError};
-use crate::limits::{CYCLE_PHASE_TIMEOUT_MS, MAX_QUEUE_DEPTH_PER_PAIR};
-use crate::ports::{AuditSink, Clock, GraphError, IdGenerator, Jitter, LocalFsError, StateStore};
-use crate::ports::{LocalFs, RemoteDrive};
 
-/// All external dependencies injected into `run_cycle`.
-pub struct EngineDeps<'a, I: IdGenerator> {
-    /// State store.
+/// Context required to run one sync cycle.
+pub struct CycleCtx<'a, I: IdGenerator> {
+    /// Sync pair id.
+    pub pair_id: onesync_protocol::id::PairId,
+    /// Absolute path on disk to the pair's local root.
+    pub local_root: onesync_protocol::path::AbsPath,
+    /// Graph drive id for this pair.
+    pub drive_id: onesync_protocol::primitives::DriveId,
+    /// Current delta cursor; `None` forces a full rescan.
+    pub cursor: Option<DeltaCursor>,
+    /// What triggered this cycle.
+    pub trigger: RunTrigger,
+    /// State store (port).
     pub state: &'a dyn StateStore,
-    /// Local filesystem.
-    pub local: &'a dyn LocalFs,
-    /// Remote drive.
+    /// Remote drive (port).
     pub remote: &'a dyn RemoteDrive,
-    /// Clock.
-    pub clock: &'a dyn Clock,
-    /// Id generator.
-    pub ids: &'a I,
-    /// Audit sink.
+    /// Local filesystem (port).
+    pub local: &'a dyn LocalFs,
+    /// Audit sink (port).
     pub audit: &'a dyn AuditSink,
-    /// Jitter source for backoff delays.
-    pub jitter: &'a dyn Jitter,
-    /// Local hostname, used for conflict loser-rename naming.
-    pub host: String,
+    /// Clock (port).
+    pub clock: &'a dyn Clock,
+    /// Id generator (port).
+    pub ids: &'a I,
+    /// Hostname used in conflict-copy filenames.
+    pub host_name: String,
 }
 
-/// Run one sync cycle for a pair.
+/// Run one full sync cycle.
 ///
 /// # Errors
 ///
-/// Returns an [`EngineError`] if any phase encounters a fatal error.
-pub async fn run_cycle<I: IdGenerator>(
-    deps: &EngineDeps<'_, I>,
-    pair_id: PairId,
-    trigger: RunTrigger,
-) -> Result<CycleSummary, EngineError> {
-    // ── Load pair ──────────────────────────────────────────────────────────
-    let pair = deps
-        .state
-        .pair_get(&pair_id)
-        .await?
-        .ok_or_else(|| EngineError::PairNotRunnable(format!("pair {pair_id} not found")))?;
+/// Returns [`EngineError::Port`] if a fatal port call fails.
+/// Returns [`EngineError::Shutdown`] if a shutdown signal is detected (future).
+pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSummary, EngineError> {
+    let now = ctx.clock.now();
+    let run_id: SyncRunId = ctx.ids.new_id();
+    let started_at = now;
 
-    if pair.paused || pair.status == PairStatus::Errored {
-        return Err(EngineError::PairNotRunnable(format!(
-            "pair {} is {:?} (paused={})",
-            pair_id, pair.status, pair.paused
-        )));
-    }
+    ctx.audit
+        .emit(cycle_started(ctx.ids.new_id(), now, ctx.pair_id));
 
-    let started_at = deps.clock.now();
-    let run_id = deps.ids.new_id::<SyncRunTag>();
+    // Phase 1 + 2 + 3: delta → reconcile → decisions.
+    let (decisions, conflicts_detected, remote_items_seen) = phase_delta_reconcile(ctx).await?;
 
-    // Emit cycle.start.
-    emit_cycle_start(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        trigger_name(trigger),
-    );
+    // Phase 4: plan.
+    let ops = plan(decisions, run_id, now, ctx.ids);
 
-    run_cycle_inner(deps, pair, run_id, trigger, started_at).await
-}
+    // Phase 5: execute.
+    let ops_applied = phase_execute(ctx, ops).await?;
 
-/// Inner cycle body, entered either directly from `run_cycle` or after a
-/// `ResyncRequired` reset. Separated so that the resync restart can call it
-/// without unbounded recursion.
-#[allow(clippy::too_many_lines)]
-async fn run_cycle_inner<I: IdGenerator>(
-    deps: &EngineDeps<'_, I>,
-    pair: Pair,
-    run_id: onesync_protocol::id::SyncRunId,
-    trigger: RunTrigger,
-    started_at: Timestamp,
-) -> Result<CycleSummary, EngineError> {
-    let pair_id = pair.id;
-    let full_scan = pair.delta_token.is_none();
-
-    // ── Phase 2: local scan delta (or full scan for initial sync) ──────────
-    let phase2_start = std::time::Instant::now();
-    let local_entries = run_phase("local_scan", CYCLE_PHASE_TIMEOUT_MS, async {
-        collect_local_entries(deps, &pair, full_scan).await
-    })
-    .await?;
-    emit_phase_timing(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        "local_scan",
-        u64::try_from(phase2_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-    );
-
-    // ── Phase 3: remote scan delta ─────────────────────────────────────────
-    let phase3_start = std::time::Instant::now();
-    // On ResyncRequired, clear the cursor and re-collect; any second failure propagates.
-    let remote_result = run_phase(
-        "remote_scan",
-        CYCLE_PHASE_TIMEOUT_MS,
-        collect_remote_entries(deps, &pair),
-    )
-    .await;
-    let (remote_entries, _new_cursor) = match remote_result {
-        Ok(v) => v,
-        Err(EngineError::Graph(GraphError::ResyncRequired)) => {
-            // The delta cursor is too old — clear it and transition to Initializing,
-            // then re-run both scans as a full initial sync.
-            let mut reset_pair = pair.clone();
-            reset_pair.delta_token = None;
-            reset_pair.status = PairStatus::Initializing;
-            reset_pair.updated_at = deps.clock.now();
-            deps.state.pair_upsert(&reset_pair).await?;
-            // Second ResyncRequired propagates as a hard error.
-            collect_remote_entries(deps, &reset_pair).await?
-        }
-        Err(other) => return Err(other),
-    };
-    emit_phase_timing(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        "remote_scan",
-        u64::try_from(phase3_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-    );
-
-    // ── Phase 4: reconcile ─────────────────────────────────────────────────
-    let phase4_start = std::time::Instant::now();
-    let decisions = reconcile_all(deps, &pair, &local_entries, &remote_entries, started_at).await?;
-    emit_phase_timing(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        "reconcile",
-        u64::try_from(phase4_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-    );
-
-    // ── Phase 5: plan FileOps ──────────────────────────────────────────────
-    let phase5_start = std::time::Instant::now();
-    let op_plan = plan(decisions, pair_id, run_id, deps.clock, deps.ids);
-    emit_phase_timing(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        "plan",
-        u64::try_from(phase5_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-    );
-
-    // ── Phase 6: execute FileOps ───────────────────────────────────────────
-    let phase6_start = std::time::Instant::now();
-    let mut local_ops: u32 = 0;
-    let mut remote_ops: u32 = 0;
-    let bytes_uploaded: u64 = 0;
-    let bytes_downloaded: u64 = 0;
-    let mut had_failure = false;
-
-    let executor_ctx = ExecutorCtx {
-        store: deps.state,
-        local: deps.local,
-        remote: deps.remote,
-    };
-
-    for op in &op_plan.ops {
-        deps.state.op_insert(op).await?;
-
-        // Retry loop with exponential backoff + jitter.
-        let mut attempt: u32 = 0;
-        let op_result = loop {
-            match execute(&executor_ctx, op, &pair).await {
-                Ok(()) => break Ok(()),
-                Err(e) => {
-                    // Non-recoverable errors stop immediately.
-                    if non_recoverable_reason(&e).is_some() {
-                        break Err(e);
-                    }
-                    // Check if there are retries remaining.
-                    match backoff_delay(attempt, deps.jitter.next()) {
-                        None => break Err(e),
-                        Some(delay) => {
-                            // Transition op to Backoff status so state reflects the delay.
-                            use onesync_protocol::enums::FileOpStatus;
-                            let _ = deps
-                                .state
-                                .op_update_status(&op.id, FileOpStatus::Backoff)
-                                .await;
-                            tokio::time::sleep(delay).await;
-                            attempt += 1;
-                        }
-                    }
-                }
-            }
-        };
-
-        if let Err(e) = op_result {
-            had_failure = true;
-            if let Some(reason) = non_recoverable_reason(&e) {
-                transition_pair_errored(deps, &pair, reason).await?;
-                break;
-            }
-        } else {
-            // Count ops by kind.
-            use onesync_protocol::enums::FileOpKind;
-            match op.kind {
-                FileOpKind::Upload
-                | FileOpKind::RemoteMkdir
-                | FileOpKind::RemoteDelete
-                | FileOpKind::RemoteRename => remote_ops += 1,
-                FileOpKind::Download
-                | FileOpKind::LocalMkdir
-                | FileOpKind::LocalDelete
-                | FileOpKind::LocalRename => local_ops += 1,
-            }
-        }
-    }
-    let _ = bytes_uploaded;
-    let _ = bytes_downloaded;
-
-    emit_phase_timing(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        "execute",
-        u64::try_from(phase6_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-    );
-
-    // ── Phase 7: record SyncRun ────────────────────────────────────────────
-    let finished_at = deps.clock.now();
-    let outcome = if had_failure {
-        RunOutcome::PartialFailure
-    } else {
-        RunOutcome::Success
-    };
-
-    let sync_run = SyncRun {
+    // Phase 6: record.
+    let finished_at = ctx.clock.now();
+    // LINT: ops_applied ≤ MAX_QUEUE_DEPTH_PER_PAIR (4096) so truncation is safe.
+    #[allow(clippy::cast_possible_truncation)]
+    let run = SyncRun {
         id: run_id,
-        pair_id,
-        trigger,
+        pair_id: ctx.pair_id,
+        trigger: ctx.trigger,
+        outcome: Some(RunOutcome::Success),
+        outcome_detail: None,
+        local_ops: ops_applied as u32,
+        remote_ops: 0,
+        bytes_uploaded: 0,
+        bytes_downloaded: 0,
         started_at,
         finished_at: Some(finished_at),
-        local_ops,
-        remote_ops,
-        bytes_uploaded,
-        bytes_downloaded,
-        outcome: Some(outcome),
-        outcome_detail: if op_plan.truncated {
-            Some("planning truncated".into())
-        } else {
-            None
-        },
     };
-    deps.state.run_record(&sync_run).await?;
+    ctx.state
+        .run_record(&run)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
 
-    emit_cycle_finish(
-        deps.audit,
-        deps.clock,
-        deps.ids,
-        pair_id,
-        match outcome {
-            RunOutcome::Success => "success",
-            RunOutcome::PartialFailure => "partial_failure",
-            RunOutcome::Aborted => "aborted",
-        },
-        local_ops,
-        remote_ops,
-    );
+    let summary = CycleSummary {
+        remote_items_seen,
+        local_events_seen: 0,
+        ops_applied,
+        conflicts_detected,
+    };
 
-    Ok(CycleSummary {
-        run_id,
-        pair_id,
-        trigger,
-        started_at,
+    ctx.audit.emit(cycle_finished(
+        ctx.ids.new_id(),
         finished_at,
-        outcome,
-        local_ops,
-        remote_ops,
-        bytes_uploaded,
-        bytes_downloaded,
-    })
+        ctx.pair_id,
+        summary.ops_applied,
+        summary.conflicts_detected,
+    ));
+
+    Ok(summary)
 }
 
-/// Wrap an async block in a phase timeout.
-async fn run_phase<F, T>(phase: &'static str, timeout_ms: u64, fut: F) -> Result<T, EngineError>
-where
-    F: std::future::Future<Output = Result<T, EngineError>>,
-{
-    timeout(Duration::from_millis(timeout_ms), fut)
-        .await
-        .map_err(|_| EngineError::PhaseTimeout { phase })?
-}
-
-/// Collect local path → `FileSide` snapshot.
-///
-/// For an incremental cycle (`full_scan = false`), reads dirty entries from
-/// the state store. For an initial sync or rescan (`full_scan = true`), calls
-/// `LocalFs::scan` to walk the entire local folder.
-async fn collect_local_entries<I: IdGenerator>(
-    deps: &EngineDeps<'_, I>,
-    pair: &Pair,
-    full_scan: bool,
-) -> Result<Vec<(RelPath, FileSide)>, EngineError> {
-    if full_scan {
-        // Walk the entire local folder.
-        let stream = deps.local.scan(&pair.local_path).await?;
-        let root = pair.local_path.as_str();
-        let entries = stream
-            .0
-            .into_iter()
-            .filter_map(|(abs, side)| {
-                // Strip the root prefix to get a relative path.
-                let abs_str = abs.to_string_lossy();
-                let rel_str = abs_str
-                    .strip_prefix(root)
-                    .map(|s| s.trim_start_matches('/'))?;
-                if rel_str.is_empty() {
-                    // Skip the root directory itself.
-                    return None;
-                }
-                let rel: RelPath = rel_str.parse().ok()?;
-                Some((rel, side))
-            })
-            .collect();
-        Ok(entries)
-    } else {
-        // Incremental: return dirty entries from the state store.
-        let dirty = deps
-            .state
-            .file_entries_dirty(&pair.id, MAX_QUEUE_DEPTH_PER_PAIR)
-            .await?;
-        let entries = dirty
-            .into_iter()
-            .filter_map(|e| e.local.map(|l| (e.relative_path, l)))
-            .collect();
-        Ok(entries)
-    }
-}
-
-/// Collect remote delta items. Returns (items, `new_cursor`).
-async fn collect_remote_entries<I: IdGenerator>(
-    deps: &EngineDeps<'_, I>,
-    pair: &Pair,
-) -> Result<
-    (
-        Vec<(RelPath, onesync_protocol::file_side::FileSide)>,
-        Option<onesync_protocol::primitives::DeltaCursor>,
-    ),
-    EngineError,
-> {
-    // Call RemoteDrive::delta. The placeholder DeltaPage contains no items yet.
-    let _page = deps
+/// Phase 1–3: fetch delta, reconcile each item, return (decisions, conflicts, `items_seen`).
+async fn phase_delta_reconcile<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+) -> Result<(Vec<crate::engine::types::Decision>, usize, usize), EngineError> {
+    let delta_page = ctx
         .remote
-        .delta(&pair.account_id_placeholder(), pair.delta_token.as_ref())
+        .delta(&ctx.drive_id, ctx.cursor.as_ref())
         .await
-        .map_err(|e| match e {
-            GraphError::ResyncRequired => {
-                // Caller should handle by re-running as initial sync.
-                EngineError::Graph(GraphError::ResyncRequired)
-            }
-            other => EngineError::Graph(other),
-        })?;
+        .map_err(|e| EngineError::Port(e.to_string()))?;
 
-    // DeltaPage is a placeholder unit struct; no items to process in this milestone.
-    Ok((Vec::new(), None))
+    let remote_items_seen = delta_page.items.len();
+    let mut decisions = Vec::new();
+    let mut conflicts_detected = 0usize;
+
+    for remote_item in &delta_page.items {
+        let Ok(rel_path) = remote_item.name.parse::<RelPath>() else {
+            continue;
+        };
+
+        let entry = ctx
+            .state
+            .file_entry_get(&ctx.pair_id, &rel_path)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?;
+
+        let remote_opt = if remote_item.is_deleted() {
+            None
+        } else {
+            Some(remote_item)
+        };
+
+        let decision = reconcile_one(ctx.pair_id, rel_path, entry.as_ref(), remote_opt);
+
+        if matches!(decision.kind, DecisionKind::Conflict { .. }) {
+            conflicts_detected += 1;
+        }
+
+        decisions.push(decision);
+    }
+
+    Ok((decisions, conflicts_detected, remote_items_seen))
 }
 
-/// Run reconciliation over all affected paths.
-async fn reconcile_all<I: IdGenerator>(
-    deps: &EngineDeps<'_, I>,
-    pair: &Pair,
-    local_entries: &[(RelPath, onesync_protocol::file_side::FileSide)],
-    remote_entries: &[(RelPath, onesync_protocol::file_side::FileSide)],
-    detected_at: Timestamp,
-) -> Result<Vec<(RelPath, Decision)>, EngineError> {
-    // Collect all paths observed in either delta.
-    let mut all_paths: BTreeSet<RelPath> = BTreeSet::new();
-    for (p, _) in local_entries {
-        all_paths.insert(p.clone());
-    }
-    for (p, _) in remote_entries {
-        all_paths.insert(p.clone());
-    }
+/// Phase 5: execute each op with retries; returns the count of ops that succeeded.
+async fn phase_execute<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    ops: Vec<FileOp>,
+) -> Result<usize, EngineError> {
+    let mut ops_applied = 0usize;
 
-    let existing: BTreeSet<RelPath> = all_paths.clone();
-    let mut decisions = Vec::new();
+    for mut op in ops {
+        ctx.state
+            .op_insert(&op)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?;
 
-    for path in all_paths {
-        let local_side = local_entries
-            .iter()
-            .find(|(p, _)| p == &path)
-            .map(|(_, s)| s);
-        let remote_side = remote_entries
-            .iter()
-            .find(|(p, _)| p == &path)
-            .map(|(_, s)| s);
+        let mut attempt: u32 = 0;
+        loop {
+            match retry_decision(attempt, pseudo_jitter(attempt)) {
+                RetryDecision::Exhausted => {
+                    ctx.state
+                        .op_update_status(&op.id, FileOpStatus::Failed)
+                        .await
+                        .map_err(|e| EngineError::Port(e.to_string()))?;
+                    break;
+                }
+                RetryDecision::Immediate | RetryDecision::Backoff { .. } => {}
+            }
 
-        // Load the current file entry for the synced side.
-        let synced_side = deps
-            .state
-            .file_entry_get(&pair.id, &path)
-            .await?
-            .as_ref()
-            .and_then(|e| e.synced.clone());
-
-        let decision = reconcile(
-            &path,
-            synced_side.as_ref(),
-            local_side,
-            remote_side,
-            &deps.host,
-            detected_at,
-            &existing,
-        );
-
-        if decision != Decision::Clean {
-            // Update FileEntry sync_state to reflect the decision.
-            let updated_state = match &decision {
-                Decision::UploadLocalToRemote => FileSyncState::PendingUpload,
-                Decision::DownloadRemoteToLocal => FileSyncState::PendingDownload,
-                Decision::Conflict { .. } => FileSyncState::PendingConflict,
-                Decision::DeleteRemote | Decision::DeleteLocal => FileSyncState::Dirty,
-                Decision::Clean => FileSyncState::Clean,
-            };
-            let entry = FileEntry {
-                pair_id: pair.id,
-                relative_path: path.clone(),
-                kind: local_side
-                    .or(remote_side)
-                    .map_or(onesync_protocol::enums::FileKind::File, |s| s.kind),
-                sync_state: updated_state,
-                local: local_side.cloned(),
-                remote: remote_side.cloned(),
-                synced: synced_side,
-                pending_op_id: None,
-                updated_at: detected_at,
-            };
-            deps.state.file_entry_upsert(&entry).await?;
-            decisions.push((path, decision));
+            op.attempts = attempt + 1;
+            match execute(&op, &ctx.local_root, ctx.local, ctx.remote).await {
+                Ok(status) => {
+                    ctx.state
+                        .op_update_status(&op.id, status)
+                        .await
+                        .map_err(|e| EngineError::Port(e.to_string()))?;
+                    ops_applied += 1;
+                    break;
+                }
+                Err(e) if is_retriable(&e) => {
+                    attempt += 1;
+                }
+                Err(e) => {
+                    ctx.state
+                        .op_update_status(&op.id, FileOpStatus::Failed)
+                        .await
+                        .map_err(|e2| EngineError::Port(e2.to_string()))?;
+                    let fail_id: AuditEventId = ctx.ids.new_id();
+                    ctx.audit.emit(op_failed(
+                        fail_id,
+                        ctx.clock.now(),
+                        ctx.pair_id,
+                        op.relative_path.as_str(),
+                        &e.to_string(),
+                    ));
+                    break;
+                }
+            }
         }
     }
 
-    Ok(decisions)
+    Ok(ops_applied)
 }
 
-/// Transition a pair to `Errored` and emit the `pair.errored` audit event.
-async fn transition_pair_errored<I: IdGenerator>(
-    deps: &EngineDeps<'_, I>,
-    pair: &Pair,
-    reason: &str,
-) -> Result<(), EngineError> {
-    let mut updated = pair.clone();
-    updated.status = PairStatus::Errored;
-    updated.errored_reason = Some(reason.to_owned());
-    updated.updated_at = deps.clock.now();
-    deps.state.pair_upsert(&updated).await?;
-    emit_pair_errored(deps.audit, deps.clock, deps.ids, pair.id, reason);
-    Ok(())
-}
-
-/// Map an `EngineError` to a non-recoverable error reason string, or `None` if retryable.
-const fn non_recoverable_reason(e: &EngineError) -> Option<&'static str> {
-    match e {
-        EngineError::Graph(GraphError::Unauthorized | GraphError::ReAuthRequired) => Some("auth"),
-        EngineError::LocalFs(LocalFsError::NotMounted(_)) => Some("local-missing"),
-        EngineError::Graph(GraphError::NotFound) => Some("remote-missing"),
-        EngineError::LocalFs(LocalFsError::PermissionDenied(_)) => Some("permission"),
-        _ => None,
-    }
-}
-
-/// Human-readable name for a trigger.
-const fn trigger_name(t: RunTrigger) -> &'static str {
-    match t {
-        RunTrigger::Scheduled => "scheduled",
-        RunTrigger::LocalEvent => "local_event",
-        RunTrigger::RemoteWebhook => "remote_webhook",
-        RunTrigger::CliForce => "cli_force",
-        RunTrigger::BackoffRetry => "backoff_retry",
-    }
-}
-
-// ─── Extension trait to work around the placeholder DriveId on Pair ───────────
-
-trait PairExt {
-    fn account_id_placeholder(&self) -> onesync_protocol::primitives::DriveId;
-}
-
-impl PairExt for Pair {
-    fn account_id_placeholder(&self) -> onesync_protocol::primitives::DriveId {
-        // In production this comes from the Account record.
-        // Placeholder: use the remote_item_id as a stand-in drive id.
-        onesync_protocol::primitives::DriveId::new(self.remote_item_id.as_str().to_owned())
-    }
+/// Deterministic pseudo-jitter for use without a random source.
+///
+/// Returns 0.25 for odd attempts, 0.0 for even — purely for retry scheduling in
+/// deterministic contexts (tests, and as a fallback). Production callers should
+/// supply true random jitter.
+const fn pseudo_jitter(attempt: u32) -> f64 {
+    if attempt % 2 == 1 { 0.25 } else { 0.0 }
 }

@@ -1,176 +1,169 @@
-//! Audit-event builders for engine emissions.
-//!
-//! Every cycle, every op, and every error category produces a structured event.
-//! Event `kind` values are the stable machine identifiers documented in
-//! [`docs/spec/03-sync-engine.md`](../../../../docs/spec/03-sync-engine.md) §Observability.
+//! Helpers that build [`AuditEvent`] values emitted by the engine.
 
 use onesync_protocol::{
     audit::AuditEvent,
     enums::AuditLevel,
-    id::{AuditTag, PairId},
+    id::{AuditEventId, PairId},
+    primitives::Timestamp,
 };
 
-use crate::ports::{AuditSink, Clock, IdGenerator};
-
-/// Engine event kinds (stable; consumers parse them).
-pub mod kinds {
-    /// A sync cycle started.
-    pub const CYCLE_START: &str = "cycle.start";
-    /// A sync cycle finished.
-    pub const CYCLE_FINISH: &str = "cycle.finish";
-    /// Timing for a single cycle phase.
-    pub const PHASE_TIMING: &str = "phase.timing";
-    /// A `FileOp` was enqueued.
-    pub const OP_ENQUEUED: &str = "op.enqueued";
-    /// A `FileOp` started execution.
-    pub const OP_STARTED: &str = "op.started";
-    /// A `FileOp` finished successfully.
-    pub const OP_FINISHED: &str = "op.finished";
-    /// A `FileOp` failed.
-    pub const OP_FAILED: &str = "op.failed";
-    /// A conflict was detected between local and remote.
-    pub const CONFLICT_DETECTED: &str = "conflict.detected";
-    /// A conflict was resolved automatically by the keep-both policy.
-    pub const CONFLICT_RESOLVED_AUTO: &str = "conflict.resolved.auto";
-    /// A conflict was resolved manually by the operator.
-    pub const CONFLICT_RESOLVED_MANUAL: &str = "conflict.resolved.manual";
-    /// The local `FSEvents` queue overflowed; full rescan required.
-    pub const LOCAL_FSEVENTS_OVERFLOW: &str = "local.fsevents.overflow";
-    /// An engine concurrency limit was reached.
-    pub const LIMIT_REACHED: &str = "limit.reached";
-    /// A pair transitioned to the `Errored` state.
-    pub const PAIR_ERRORED: &str = "pair.errored";
-}
-
-/// Emit an event through an [`AuditSink`].
+/// Build an `AuditEvent` with the given fields.
 ///
-/// `I` must implement [`IdGenerator`].  Uses a generic bound rather than
-/// `&dyn IdGenerator` because [`IdGenerator::new_id`] takes a generic
-/// parameter and the trait is not object-safe.
-pub fn emit<I: IdGenerator>(
-    sink: &dyn AuditSink,
-    clock: &dyn Clock,
-    ids: &I,
+/// The `id` is supplied by the caller (obtained from the `IdGenerator` port).
+#[must_use]
+pub fn make_event(
+    id: AuditEventId,
+    ts: Timestamp,
     level: AuditLevel,
-    kind: &str,
+    kind: impl Into<String>,
     pair_id: Option<PairId>,
     payload: serde_json::Map<String, serde_json::Value>,
-) {
-    let event = AuditEvent {
-        id: ids.new_id::<AuditTag>(),
-        ts: clock.now(),
+) -> AuditEvent {
+    AuditEvent {
+        id,
+        ts,
         level,
-        kind: kind.to_owned(),
+        kind: kind.into(),
         pair_id,
         payload,
-    };
-    sink.emit(event);
+    }
 }
 
-/// Convenience wrapper to emit a `cycle.start` event.
-pub fn emit_cycle_start<I: IdGenerator>(
-    sink: &dyn AuditSink,
-    clock: &dyn Clock,
-    ids: &I,
+/// Build a cycle-started event.
+#[must_use]
+pub fn cycle_started(id: AuditEventId, ts: Timestamp, pair_id: PairId) -> AuditEvent {
+    make_event(
+        id,
+        ts,
+        AuditLevel::Info,
+        "sync_cycle_started",
+        Some(pair_id),
+        serde_json::Map::new(),
+    )
+}
+
+/// Build a cycle-finished event.
+#[must_use]
+pub fn cycle_finished(
+    id: AuditEventId,
+    ts: Timestamp,
     pair_id: PairId,
-    trigger: &str,
-) {
+    ops_applied: usize,
+    conflicts: usize,
+) -> AuditEvent {
     let mut payload = serde_json::Map::new();
     payload.insert(
-        "trigger".into(),
-        serde_json::Value::String(trigger.to_owned()),
+        "ops_applied".to_owned(),
+        serde_json::Value::Number(ops_applied.into()),
     );
-    emit(
-        sink,
-        clock,
-        ids,
+    payload.insert(
+        "conflicts_detected".to_owned(),
+        serde_json::Value::Number(conflicts.into()),
+    );
+    make_event(
+        id,
+        ts,
         AuditLevel::Info,
-        kinds::CYCLE_START,
+        "sync_cycle_finished",
         Some(pair_id),
         payload,
-    );
+    )
 }
 
-/// Convenience wrapper to emit a `cycle.finish` event.
-pub fn emit_cycle_finish<I: IdGenerator>(
-    sink: &dyn AuditSink,
-    clock: &dyn Clock,
-    ids: &I,
+/// Build a file-op-failed event.
+#[must_use]
+pub fn op_failed(
+    id: AuditEventId,
+    ts: Timestamp,
     pair_id: PairId,
-    outcome: &str,
-    local_ops: u32,
-    remote_ops: u32,
-) {
-    let mut payload = serde_json::Map::new();
-    payload.insert(
-        "outcome".into(),
-        serde_json::Value::String(outcome.to_owned()),
-    );
-    payload.insert(
-        "local_ops".into(),
-        serde_json::Value::Number(serde_json::Number::from(local_ops)),
-    );
-    payload.insert(
-        "remote_ops".into(),
-        serde_json::Value::Number(serde_json::Number::from(remote_ops)),
-    );
-    emit(
-        sink,
-        clock,
-        ids,
-        AuditLevel::Info,
-        kinds::CYCLE_FINISH,
-        Some(pair_id),
-        payload,
-    );
-}
-
-/// Convenience wrapper to emit a `phase.timing` event.
-pub fn emit_phase_timing<I: IdGenerator>(
-    sink: &dyn AuditSink,
-    clock: &dyn Clock,
-    ids: &I,
-    pair_id: PairId,
-    phase: &str,
-    elapsed_ms: u64,
-) {
-    let mut payload = serde_json::Map::new();
-    payload.insert("phase".into(), serde_json::Value::String(phase.to_owned()));
-    payload.insert(
-        "elapsed_ms".into(),
-        serde_json::Value::Number(serde_json::Number::from(elapsed_ms)),
-    );
-    emit(
-        sink,
-        clock,
-        ids,
-        AuditLevel::Info,
-        kinds::PHASE_TIMING,
-        Some(pair_id),
-        payload,
-    );
-}
-
-/// Convenience wrapper to emit a `pair.errored` event.
-pub fn emit_pair_errored<I: IdGenerator>(
-    sink: &dyn AuditSink,
-    clock: &dyn Clock,
-    ids: &I,
-    pair_id: PairId,
+    relative_path: &str,
     reason: &str,
-) {
+) -> AuditEvent {
     let mut payload = serde_json::Map::new();
     payload.insert(
-        "reason".into(),
+        "relative_path".to_owned(),
+        serde_json::Value::String(relative_path.to_owned()),
+    );
+    payload.insert(
+        "reason".to_owned(),
         serde_json::Value::String(reason.to_owned()),
     );
-    emit(
-        sink,
-        clock,
-        ids,
+    make_event(
+        id,
+        ts,
         AuditLevel::Error,
-        kinds::PAIR_ERRORED,
+        "file_op_failed",
         Some(pair_id),
         payload,
+    )
+}
+
+/// Build a conflict-detected event.
+#[must_use]
+pub fn conflict_detected(
+    id: AuditEventId,
+    ts: Timestamp,
+    pair_id: PairId,
+    relative_path: &str,
+) -> AuditEvent {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "relative_path".to_owned(),
+        serde_json::Value::String(relative_path.to_owned()),
     );
+    make_event(
+        id,
+        ts,
+        AuditLevel::Warn,
+        "conflict_detected",
+        Some(pair_id),
+        payload,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use onesync_protocol::{id::PairId, primitives::Timestamp};
+    use ulid::Ulid;
+
+    fn now() -> Timestamp {
+        // LINT: Utc::now() is allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        Timestamp::from_datetime(Utc::now())
+    }
+
+    fn pair() -> PairId {
+        // LINT: Ulid::new() is allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        PairId::from_ulid(Ulid::new())
+    }
+
+    fn audit_id() -> AuditEventId {
+        // LINT: Ulid::new() is allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        AuditEventId::from_ulid(Ulid::new())
+    }
+
+    #[test]
+    fn cycle_started_has_correct_kind() {
+        let evt = cycle_started(audit_id(), now(), pair());
+        assert_eq!(evt.kind, "sync_cycle_started");
+        assert_eq!(evt.level, AuditLevel::Info);
+    }
+
+    #[test]
+    fn cycle_finished_payload_contains_ops_applied() {
+        let evt = cycle_finished(audit_id(), now(), pair(), 7, 1);
+        assert_eq!(evt.payload["ops_applied"], 7);
+        assert_eq!(evt.payload["conflicts_detected"], 1);
+    }
+
+    #[test]
+    fn op_failed_is_error_level() {
+        let evt = op_failed(audit_id(), now(), pair(), "docs/a.txt", "network timeout");
+        assert_eq!(evt.level, AuditLevel::Error);
+        assert_eq!(evt.payload["relative_path"], "docs/a.txt");
+    }
 }

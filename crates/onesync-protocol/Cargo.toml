@@ -15,6 +15,7 @@ thiserror     = { workspace = true }
 ulid          = { workspace = true }
 chrono        = { workspace = true }
 unicode-normalization = { workspace = true }
+bytes         = { workspace = true }
 
 [dev-dependencies]
 jsonschema    = { workspace = true }

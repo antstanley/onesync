@@ -1,14 +1,14 @@
 //! [`GraphAdapter`]: the concrete `RemoteDrive` implementation.
 
 use async_trait::async_trait;
-use onesync_core::ports::{
-    GraphError, RemoteDrive,
-    remote_drive::{
-        AccessToken, AccountProfile, DeltaPage as PortDeltaPage, RemoteItem as PortRemoteItem,
-        RemoteItemId, RemoteReadStream, UploadSession,
+use onesync_core::ports::{GraphError, RemoteDrive};
+use onesync_protocol::{
+    primitives::{DeltaCursor, DriveId},
+    remote::{
+        AccessToken, AccountProfile, DeltaPage, RemoteItem, RemoteItemId, RemoteReadStream,
+        UploadSession,
     },
 };
-use onesync_protocol::primitives::{DeltaCursor, DriveId};
 
 use crate::error::{GraphInternalError, map_to_port};
 
@@ -48,8 +48,6 @@ impl TokenSource for FixedTokenSource {
 pub struct GraphAdapter {
     http: reqwest::Client,
     token_source: Box<dyn TokenSource>,
-    // LINT: drive_id is stored for future full-adapter expansion; suppress until M4 wires it.
-    #[allow(dead_code)]
     drive_id: DriveId,
 }
 
@@ -96,20 +94,27 @@ impl GraphAdapter {
 #[async_trait]
 impl RemoteDrive for GraphAdapter {
     async fn account_profile(&self, _token: &AccessToken) -> Result<AccountProfile, GraphError> {
-        // AccountProfile is a placeholder in the port; we return the unit value.
-        // The real profile fetch is via items::account_profile.
-        Ok(AccountProfile)
+        let token = self.token().await?;
+        let profile_dto = crate::items::account_profile(&self.http, &token)
+            .await
+            .map_err(map_to_port)?;
+        Ok(AccountProfile {
+            oid: profile_dto.id,
+            upn: profile_dto.user_principal_name,
+            display_name: profile_dto.display_name,
+            tenant_id: String::new(), // populated by id_token parsing in MSAL flow
+            drive_id: String::new(),  // populated by /me/drive call
+        })
     }
 
     async fn item_by_path(
         &self,
         drive: &DriveId,
         path: &str,
-    ) -> Result<Option<PortRemoteItem>, GraphError> {
+    ) -> Result<Option<RemoteItem>, GraphError> {
         let token = self.token().await?;
         crate::items::item_by_path(&self.http, &token, drive, path)
             .await
-            .map(|opt| opt.map(|_item| PortRemoteItem))
             .map_err(map_to_port)
     }
 
@@ -117,55 +122,139 @@ impl RemoteDrive for GraphAdapter {
         &self,
         drive: &DriveId,
         cursor: Option<&DeltaCursor>,
-    ) -> Result<PortDeltaPage, GraphError> {
+    ) -> Result<DeltaPage, GraphError> {
         let token = self.token().await?;
         crate::delta::delta_page(&self.http, &token, drive, cursor)
             .await
-            .map(|_page| PortDeltaPage)
             .map_err(map_to_port)
     }
 
-    async fn download(&self, _item: &RemoteItemId) -> Result<RemoteReadStream, GraphError> {
-        // RemoteReadStream is a port placeholder; actual bytes are returned via download_from_url.
-        Ok(RemoteReadStream)
+    async fn download(&self, item: &RemoteItemId) -> Result<RemoteReadStream, GraphError> {
+        let token = self.token().await?;
+        let bytes =
+            crate::download::download(&self.http, &token, &self.drive_id, item.as_str(), None)
+                .await
+                .map_err(map_to_port)?;
+        Ok(RemoteReadStream(bytes))
     }
 
     async fn upload_small(
         &self,
-        _parent: &RemoteItemId,
-        _name: &str,
-        _bytes: &[u8],
-    ) -> Result<PortRemoteItem, GraphError> {
-        Ok(PortRemoteItem)
+        parent: &RemoteItemId,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<RemoteItem, GraphError> {
+        let token = self.token().await?;
+        crate::upload::small::upload_small(
+            &self.http,
+            &token,
+            &self.drive_id,
+            parent.as_str(),
+            name,
+            bytes,
+        )
+        .await
+        .map_err(map_to_port)
     }
 
     async fn upload_session(
         &self,
-        _parent: &RemoteItemId,
-        _name: &str,
-        _size: u64,
+        parent: &RemoteItemId,
+        name: &str,
+        size: u64,
     ) -> Result<UploadSession, GraphError> {
-        Ok(UploadSession)
+        // The port's upload_session returns a session handle containing the upload URL.
+        // The adapter creates the session via createUploadSession and returns the URL.
+        // The caller is responsible for driving the chunk uploads.
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize)]
+        struct SessionBody<'a> {
+            item: SessionItem<'a>,
+        }
+        #[derive(Serialize)]
+        struct SessionItem<'a> {
+            #[serde(rename = "@microsoft.graph.conflictBehavior")]
+            conflict_behavior: &'a str,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SessionResp {
+            upload_url: String,
+        }
+
+        let token = self.token().await?;
+        let session_create_url = format!(
+            "https://graph.microsoft.com/v1.0/drives/{}/items/{}:/{}:/createUploadSession",
+            self.drive_id.as_str(),
+            parent.as_str(),
+            name
+        );
+        let body = SessionBody {
+            item: SessionItem {
+                conflict_behavior: "replace",
+            },
+        };
+        // LINT: size is informational here; it's used when the caller uploads chunks.
+        let _ = size;
+
+        let request_id = {
+            let mut buf = [0u8; 8];
+            // LINT: getrandom failure is unrecoverable.
+            #[allow(clippy::expect_used)]
+            getrandom::getrandom(&mut buf).expect("getrandom");
+            buf.iter().fold(String::new(), |mut s, b| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{b:02x}");
+                s
+            })
+        };
+        let resp = self
+            .http
+            .post(&session_create_url)
+            .bearer_auth(&token)
+            .header("client-request-id", &request_id)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| GraphError::Network {
+                detail: e.to_string(),
+            })?;
+
+        let sess: SessionResp = crate::client::check_status(resp, &request_id)
+            .await
+            .map_err(map_to_port)?
+            .json()
+            .await
+            .map_err(|e| GraphError::Decode {
+                detail: e.to_string(),
+            })?;
+
+        Ok(UploadSession {
+            upload_url: sess.upload_url,
+            bytes_uploaded: 0,
+        })
     }
 
-    async fn rename(
-        &self,
-        _item: &RemoteItemId,
-        _new_name: &str,
-    ) -> Result<PortRemoteItem, GraphError> {
-        Ok(PortRemoteItem)
+    async fn rename(&self, item: &RemoteItemId, new_name: &str) -> Result<RemoteItem, GraphError> {
+        let token = self.token().await?;
+        crate::ops::rename(&self.http, &token, &self.drive_id, item.as_str(), new_name)
+            .await
+            .map_err(map_to_port)
     }
 
-    async fn delete(&self, _item: &RemoteItemId) -> Result<(), GraphError> {
-        Ok(())
+    async fn delete(&self, item: &RemoteItemId) -> Result<(), GraphError> {
+        let token = self.token().await?;
+        crate::ops::delete(&self.http, &token, &self.drive_id, item.as_str())
+            .await
+            .map_err(map_to_port)
     }
 
-    async fn mkdir(
-        &self,
-        _parent: &RemoteItemId,
-        _name: &str,
-    ) -> Result<PortRemoteItem, GraphError> {
-        Ok(PortRemoteItem)
+    async fn mkdir(&self, parent: &RemoteItemId, name: &str) -> Result<RemoteItem, GraphError> {
+        let token = self.token().await?;
+        crate::ops::mkdir(&self.http, &token, &self.drive_id, parent.as_str(), name)
+            .await
+            .map_err(map_to_port)
     }
 }
 
@@ -173,20 +262,12 @@ impl RemoteDrive for GraphAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::items::RemoteItem;
+    use crate::items::RemoteItem as GraphItem;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_http() -> reqwest::Client {
         reqwest::Client::builder().use_rustls_tls().build().unwrap()
-    }
-
-    // Helper kept for future tests; prefixed to suppress lint during development.
-    #[allow(dead_code)]
-    fn _adapter_for(_server: &MockServer) -> GraphAdapter {
-        let token = FixedTokenSource("test-token".to_owned());
-        GraphAdapter::with_client(make_http(), token, DriveId::new("drv-test"))
     }
 
     /// Internal delta test: uses `fetch_delta_page` directly with a wiremock URL.
@@ -237,7 +318,7 @@ mod tests {
         let http = make_http();
         let url = server.uri();
         let resp = http.get(&url).bearer_auth("tok").send().await.unwrap();
-        let item: RemoteItem = resp.json().await.unwrap();
+        let item: GraphItem = resp.json().await.unwrap();
         assert_eq!(item.id, "found-item");
     }
 
@@ -281,7 +362,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        let item: RemoteItem = resp.json().await.unwrap();
+        let item: GraphItem = resp.json().await.unwrap();
         assert_eq!(item.name, "new-name.txt");
     }
 }

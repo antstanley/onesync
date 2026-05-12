@@ -20,4 +20,6 @@ pub mod id;
 pub mod pair;
 pub mod path;
 pub mod primitives;
+pub mod remote;
+pub mod rpc;
 pub mod sync_run;

@@ -2,8 +2,11 @@
 
 use async_trait::async_trait;
 use onesync_protocol::{
-    account::Account,
     primitives::{DeltaCursor, DriveId},
+    remote::{
+        AccessToken, AccountProfile, DeltaPage, RemoteItem, RemoteItemId, RemoteReadStream,
+        UploadSession,
+    },
 };
 
 /// Errors returned by `RemoteDrive` operations.
@@ -65,21 +68,6 @@ pub enum GraphError {
     TooLarge,
 }
 
-/// Placeholder type for an issued OAuth access token; flesh out in `onesync-graph` (M3).
-pub struct AccessToken;
-/// Placeholder type for the `/me` Graph response; flesh out in `onesync-graph` (M3).
-pub struct AccountProfile;
-/// Placeholder type for a `OneDrive` `driveItem`; flesh out in `onesync-graph` (M3).
-pub struct RemoteItem;
-/// Placeholder type for a `OneDrive` `driveItem.id`; flesh out in `onesync-graph` (M3).
-pub struct RemoteItemId;
-/// Placeholder type for a `/delta` response page; flesh out in `onesync-graph` (M3).
-pub struct DeltaPage;
-/// Placeholder type for a Graph download stream; flesh out in `onesync-graph` (M3).
-pub struct RemoteReadStream;
-/// Placeholder type for a Graph upload session; flesh out in `onesync-graph` (M3).
-pub struct UploadSession;
-
 /// The Microsoft Graph surface the engine drives.
 #[async_trait]
 pub trait RemoteDrive: Send + Sync {
@@ -117,10 +105,6 @@ pub trait RemoteDrive: Send + Sync {
     async fn rename(&self, item: &RemoteItemId, new_name: &str) -> Result<RemoteItem, GraphError>;
     /// Move a remote item to the Recycle Bin.
     async fn delete(&self, item: &RemoteItemId) -> Result<(), GraphError>;
-    /// Create a child folder under `parent`. Returns the existing folder on `conflictBehavior=fail`.
+    /// Create a child folder under `parent`.
     async fn mkdir(&self, parent: &RemoteItemId, name: &str) -> Result<RemoteItem, GraphError>;
 }
-
-// Silence the unused-import lint until M3 fleshes these out.
-#[allow(dead_code, clippy::missing_const_for_fn)]
-fn _types_kept_in_scope(_a: &Account) {}

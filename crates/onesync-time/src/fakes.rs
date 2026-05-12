@@ -1,4 +1,4 @@
-//! Test doubles for the `Clock`, `IdGenerator`, and `Jitter` ports.
+//! Test doubles for the `Clock` and `IdGenerator` ports.
 
 // LINT: this module is the test-double surface for the Clock/IdGenerator ports;
 //       mutex-poison expects are the standard pattern and don't warrant escape-hatch
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use onesync_core::ports::{Clock, IdGenerator, Jitter};
+use onesync_core::ports::{Clock, IdGenerator};
 use onesync_protocol::{
     id::{Id, IdPrefix},
     primitives::Timestamp,
@@ -78,17 +78,6 @@ impl IdGenerator for TestIdGenerator {
         // Pack seed and counter into a deterministic 128-bit value.
         let bits = (u128::from(self.seed) << 64) | u128::from(n);
         Id::from_ulid(Ulid::from(bits))
-    }
-}
-
-/// A `Jitter` implementation that always returns a fixed value.
-///
-/// Useful for deterministic retry-delay assertions in tests.
-pub struct FakeJitter(pub f64);
-
-impl Jitter for FakeJitter {
-    fn next(&self) -> f64 {
-        self.0.clamp(0.0, 1.0)
     }
 }
 

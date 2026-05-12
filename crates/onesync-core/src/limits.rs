@@ -104,6 +104,18 @@ pub const UPGRADE_DRAIN_TIMEOUT_S: u64 = 30;
 /// Maximum tolerated clock skew in seconds between daemon and remote.
 pub const MAX_CLOCK_SKEW_S: i64 = 600;
 
+// ── Tokio runtime ────────────────────────────────────────────────────────────
+
+/// Maximum Tokio worker threads: `min(available_parallelism, 4)`.
+///
+/// This is a runtime-derived value and cannot be a `const`. Keeps the daemon
+/// from monopolising the CPU on large-core machines while still saturating a
+/// typical 4-core developer laptop.
+#[must_use]
+pub fn max_runtime_workers() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get().min(4))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +137,12 @@ mod tests {
         assert_eq!(KIB, 1024);
         assert_eq!(MIB, 1024 * 1024);
         assert_eq!(GIB, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn max_runtime_workers_is_in_expected_range() {
+        let w = max_runtime_workers();
+        assert!(w >= 1, "must have at least 1 worker");
+        assert!(w <= 4, "must be capped at 4 workers, got {w}");
     }
 }

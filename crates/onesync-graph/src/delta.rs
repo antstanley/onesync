@@ -1,23 +1,15 @@
 //! Delta pager: `/drives/{id}/root/delta` with `nextLink` and `deltaLink` handling.
 
-use onesync_protocol::primitives::{DeltaCursor, DriveId};
+use onesync_protocol::{
+    primitives::{DeltaCursor, DriveId},
+    remote::DeltaPage,
+};
 use serde::Deserialize;
 
 use crate::error::GraphInternalError;
 use crate::items::RemoteItem;
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
-
-/// A single page of delta results from Microsoft Graph.
-#[derive(Debug)]
-pub struct DeltaPage {
-    /// Drive items changed since the last cursor (may include tombstones).
-    pub items: Vec<RemoteItem>,
-    /// If present, fetch this URL to continue paging.
-    pub next_link: Option<String>,
-    /// Present only on the final page; use as the next delta cursor.
-    pub delta_token: Option<DeltaCursor>,
-}
 
 /// Raw wire shape of a `/delta` response page.
 #[derive(Debug, Deserialize)]

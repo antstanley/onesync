@@ -7,6 +7,7 @@
 
 pub mod connection;
 pub mod error;
+#[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
 pub mod migrations;
 pub mod queries;

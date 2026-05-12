@@ -1,10 +1,18 @@
 //! Graph item-probe helpers: `/me`, `/me/drive`, `/me/drive/root:/{path}`.
+//!
+//! The `RemoteItem` type (and related facets) are defined in `onesync-protocol::remote`
+//! and re-exported here for callers within the graph crate that already import from `items`.
 
 use serde::{Deserialize, Serialize};
 
 use onesync_protocol::primitives::DriveId;
 
 use crate::error::GraphInternalError;
+
+/// Re-export the canonical `RemoteItem` from `onesync-protocol::remote`.
+pub use onesync_protocol::remote::{
+    DeletedFacet, FileFacet, FileHashes, FolderFacet, ParentReference, RemoteItem,
+};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
@@ -28,96 +36,6 @@ pub struct DriveDto {
     pub id: String,
     /// `"personal"` for `OneDrive` Personal, `"business"` for `OneDrive` for Business.
     pub drive_type: String,
-}
-
-/// File hash values from the `file.hashes` facet.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct FileHashes {
-    /// SHA-1 hash hex string (Personal accounts).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha1_hash: Option<String>,
-    /// `QuickXorHash` hex string (Business accounts).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quick_xor_hash: Option<String>,
-}
-
-/// File facet on a `driveItem`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FileFacet {
-    /// Hash values for the file.
-    #[serde(default)]
-    pub hashes: FileHashes,
-}
-
-/// Folder facet on a `driveItem`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderFacet {
-    /// Number of children in the folder.
-    #[serde(default)]
-    pub child_count: u64,
-}
-
-/// Deleted facet: present when a `driveItem` has been removed.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DeletedFacet {}
-
-/// A `driveItem` from the Microsoft Graph API.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteItem {
-    /// Stable item identifier.
-    pub id: String,
-    /// File/folder name.
-    pub name: String,
-    /// Size in bytes.
-    #[serde(default)]
-    pub size: u64,
-    /// Entity tag for conflict detection.
-    #[serde(rename = "eTag", skip_serializing_if = "Option::is_none")]
-    pub e_tag: Option<String>,
-    /// Content tag.
-    #[serde(rename = "cTag", skip_serializing_if = "Option::is_none")]
-    pub c_tag: Option<String>,
-    /// Last modified time (ISO-8601).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_modified_date_time: Option<String>,
-    /// Present if the item is a folder.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub folder: Option<FolderFacet>,
-    /// Present if the item is a file.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<FileFacet>,
-    /// Present when the item has been deleted (tombstone in delta responses).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<DeletedFacet>,
-    /// Parent reference.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_reference: Option<ParentReference>,
-}
-
-impl RemoteItem {
-    /// Returns `true` if this is a tombstone (deleted item) in a delta response.
-    #[must_use]
-    pub const fn is_deleted(&self) -> bool {
-        self.deleted.is_some()
-    }
-}
-
-/// Minimal parent reference for a `driveItem`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParentReference {
-    /// Parent item identifier.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// Drive identifier.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drive_id: Option<String>,
-    /// Path within the drive.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
 }
 
 /// `GET /me` — fetch the signed-in user's profile.

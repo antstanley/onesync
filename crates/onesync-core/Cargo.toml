@@ -16,12 +16,14 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
 tokio            = { workspace = true }
+ulid             = { workspace = true }
 
 [dev-dependencies]
-proptest         = { workspace = true }
-ulid             = { workspace = true }
-blake3           = { workspace = true }
-onesync-state    = { path = "../onesync-state",    features = ["fakes"] }
+proptest        = { workspace = true }
+chrono          = { workspace = true }
+tokio           = { workspace = true, features = ["rt-multi-thread", "macros"] }
+ulid            = { workspace = true }
+onesync-time    = { path = "../onesync-time" }
+onesync-state   = { path = "../onesync-state", features = ["fakes"] }
 onesync-fs-local = { path = "../onesync-fs-local", features = ["fakes"] }
-onesync-keychain = { path = "../onesync-keychain", features = ["fakes"] }
-onesync-time     = { path = "../onesync-time" }
+onesync-graph   = { path = "../onesync-graph", features = ["fakes"] }

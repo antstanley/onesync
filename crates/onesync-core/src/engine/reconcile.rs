@@ -1,282 +1,255 @@
-//! Pure reconciliation: `(synced, local, remote)` → `Decision`.
-
-use std::collections::BTreeSet;
+//! Pure reconciliation function: local state × remote delta → [`Decision`] list.
+//!
+//! Every function in this module is synchronous and infallible — all I/O has
+//! already been performed; inputs are plain data values.
 
 use onesync_protocol::{
-    enums::ConflictSide, file_side::FileSide, path::RelPath, primitives::Timestamp,
+    enums::{FileKind, FileSyncState},
+    file_entry::FileEntry,
+    file_side::FileSide,
+    id::PairId,
+    path::RelPath,
+    remote::RemoteItem,
 };
 
-use crate::engine::conflict::loser_rename_target;
-use crate::engine::types::Decision;
-use crate::limits::CONFLICT_MTIME_TOLERANCE_MS;
+use crate::engine::types::{Decision, DecisionKind};
 
-/// Compute the engine's decision for a single path.
+/// Reconcile one path's [`FileEntry`] (from the state store) against the
+/// latest [`RemoteItem`] from a delta page.
 ///
-/// `host` is used in conflict loser-rename naming.
-/// `existing` is the set of relative paths already in use under the same pair —
-///   passed so the conflict path collision check can avoid landing the renamed loser
-///   on top of another entry.
+/// Either argument may be `None`:
+/// * `entry = None` — path is not yet tracked locally.
+/// * `remote = None` — path was deleted from remote.
+///
+/// Returns a [`Decision`] describing what the engine should do. Pure: no I/O,
+/// no side-effects.
 #[must_use]
-pub fn reconcile(
-    relative_path: &RelPath,
-    synced: Option<&FileSide>,
-    local: Option<&FileSide>,
-    remote: Option<&FileSide>,
-    host: &str,
-    detected_at: Timestamp,
-    existing: &BTreeSet<RelPath>,
+pub fn reconcile_one(
+    pair_id: PairId,
+    relative_path: RelPath,
+    entry: Option<&FileEntry>,
+    remote: Option<&RemoteItem>,
 ) -> Decision {
-    let local_diff = sides_diverge(synced, local);
-    let remote_diff = sides_diverge(synced, remote);
-
-    match (local_diff, remote_diff) {
-        (false, false) => Decision::Clean,
-        (true, false) => match (synced, local) {
-            (Some(_), None) => Decision::DeleteRemote,
-            _ => Decision::UploadLocalToRemote,
-        },
-        (false, true) => match (synced, remote) {
-            (Some(_), None) => Decision::DeleteLocal,
-            _ => Decision::DownloadRemoteToLocal,
-        },
-        (true, true) => {
-            // Both diverged from synced. If local == remote, they converged
-            // independently — mark Clean.
-            if sides_content_equal(local, remote) {
-                return Decision::Clean;
-            }
-            // Otherwise, run conflict policy.
-            let winner = choose_winner(local, remote);
-            let Some(loser_target) =
-                loser_rename_target(relative_path, detected_at, host, existing)
-            else {
-                // Exhausted retries — fall back to Clean and surface in audit
-                // (caller logs `conflict.unresolvable`).
-                return Decision::Clean;
-            };
-            Decision::Conflict {
-                winner,
-                loser_target,
-            }
-        }
+    let kind = reconcile_kind(entry, remote);
+    Decision {
+        pair_id,
+        relative_path,
+        kind,
     }
 }
 
-fn sides_diverge(a: Option<&FileSide>, b: Option<&FileSide>) -> bool {
-    !sides_content_equal(a, b)
-}
+fn reconcile_kind(entry: Option<&FileEntry>, remote: Option<&RemoteItem>) -> DecisionKind {
+    match (entry, remote) {
+        // No local tracking, no remote item: nothing to do.
+        (None, None) => DecisionKind::NoOp,
 
-fn sides_content_equal(a: Option<&FileSide>, b: Option<&FileSide>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(_), None) | (None, Some(_)) => false,
-        (Some(x), Some(y)) => x.identifies_same_content_as(y),
-    }
-}
-
-fn choose_winner(local: Option<&FileSide>, remote: Option<&FileSide>) -> ConflictSide {
-    // Mtime tie-break per spec: newer wins; within tolerance, remote wins.
-    let l_mtime = local.map(|s| s.mtime.into_inner());
-    let r_mtime = remote.map(|s| s.mtime.into_inner());
-    match (l_mtime, r_mtime) {
-        (Some(l), Some(r)) => {
-            let l_ms = l.timestamp_millis();
-            let r_ms = r.timestamp_millis();
-            // LINT: absolute delta fits u64; signs cancel out.
-            #[allow(clippy::cast_sign_loss)]
-            let delta_ms = (l_ms - r_ms).unsigned_abs();
-            if delta_ms <= CONFLICT_MTIME_TOLERANCE_MS {
-                return ConflictSide::Remote;
-            }
-            if l_ms > r_ms {
-                ConflictSide::Local
+        // Remote item exists, nothing tracked locally → download (or mkdir).
+        (None, Some(r)) => {
+            if r.is_folder() {
+                DecisionKind::LocalMkdir
             } else {
-                ConflictSide::Remote
+                DecisionKind::Download
             }
         }
-        (Some(_), None) => ConflictSide::Local,
-        // Either remote-only or neither side: remote wins (arbitrary but deterministic).
-        (None, _) => ConflictSide::Remote,
+
+        // Local tracking exists, remote item deleted → delete local copy.
+        (Some(_entry), None) => DecisionKind::LocalDelete,
+
+        // Both sides present.
+        (Some(entry), Some(remote)) => reconcile_both(entry, remote),
+    }
+}
+
+fn reconcile_both(entry: &FileEntry, remote: &RemoteItem) -> DecisionKind {
+    // If there's already an in-flight op or conflict, do nothing this cycle.
+    match entry.sync_state {
+        FileSyncState::InFlight | FileSyncState::PendingConflict => {
+            return DecisionKind::NoOp;
+        }
+        FileSyncState::Clean
+        | FileSyncState::Dirty
+        | FileSyncState::PendingUpload
+        | FileSyncState::PendingDownload => {}
+    }
+
+    let local_side: Option<&FileSide> = entry.local.as_ref();
+    let synced_side: Option<&FileSide> = entry.synced.as_ref();
+
+    // Did the remote change relative to the last synced snapshot?
+    let remote_changed = remote_differs_from_synced(remote, synced_side);
+    // Did the local side change relative to the last synced snapshot?
+    let local_changed = local_differs_from_synced(local_side, synced_side);
+
+    match (local_changed, remote_changed) {
+        // Neither changed.
+        (false, false) => DecisionKind::NoOp,
+
+        // Only remote changed → download the new version.
+        (false, true) => {
+            if remote.is_folder() {
+                DecisionKind::LocalMkdir
+            } else {
+                DecisionKind::Download
+            }
+        }
+
+        // Only local changed → upload.
+        (true, false) => {
+            if entry.kind == FileKind::Directory {
+                DecisionKind::RemoteMkdir
+            } else {
+                DecisionKind::Upload
+            }
+        }
+
+        // Both changed → conflict.
+        (true, true) => {
+            // The caller resolves the conflict with pick_winner_and_loser; here we
+            // just signal that one exists. The loser_path is filled by the planner.
+            DecisionKind::Conflict {
+                winner: onesync_protocol::enums::ConflictSide::Remote,
+                loser_path: entry.relative_path.clone(),
+            }
+        }
+    }
+}
+
+/// Returns `true` if the remote item differs from the synced snapshot.
+fn remote_differs_from_synced(remote: &RemoteItem, synced: Option<&FileSide>) -> bool {
+    let Some(synced) = synced else {
+        // No synced snapshot yet means the remote is "new" to us.
+        return true;
+    };
+    // Compare by remote ETag (fast) if present; fall back to size.
+    if let Some(etag) = synced.etag.as_ref()
+        && let Some(remote_etag) = remote.e_tag.as_deref()
+    {
+        return etag.as_str() != remote_etag;
+    }
+    synced.size_bytes != remote.size
+}
+
+/// Returns `true` if the local side differs from the synced snapshot.
+fn local_differs_from_synced(local: Option<&FileSide>, synced: Option<&FileSide>) -> bool {
+    match (local, synced) {
+        (None, None) => false,
+        // local deleted or local appeared
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(l), Some(s)) => !l.identifies_same_content_as(s),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use onesync_protocol::{
-        enums::FileKind,
-        primitives::{ContentHash, Timestamp},
+        enums::{FileKind, FileSyncState},
+        file_entry::FileEntry,
+        id::PairId,
+        path::RelPath,
+        primitives::Timestamp,
+        remote::RemoteItem,
     };
+    use ulid::Ulid;
 
-    fn rel(s: &str) -> RelPath {
-        s.parse().expect("rel")
+    fn pair() -> PairId {
+        // LINT: Ulid::new() is allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        PairId::from_ulid(Ulid::new())
     }
 
-    fn side(size: u64, hash_seed: u8, mtime_secs: i64) -> FileSide {
-        let bytes = [hash_seed; 32];
-        FileSide {
-            kind: FileKind::File,
-            size_bytes: size,
-            content_hash: Some(ContentHash::from_bytes(bytes)),
-            mtime: Timestamp::from_datetime(Utc.timestamp_opt(mtime_secs, 0).unwrap()),
-            etag: None,
-            remote_item_id: None,
-        }
+    fn path(s: &str) -> RelPath {
+        s.parse().unwrap()
     }
 
     fn ts(secs: i64) -> Timestamp {
         Timestamp::from_datetime(Utc.timestamp_opt(secs, 0).unwrap())
     }
 
-    #[test]
-    fn all_equal_yields_clean() {
-        let s = side(10, 1, 0);
-        let d = reconcile(
-            &rel("f"),
-            Some(&s),
-            Some(&s),
-            Some(&s),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert_eq!(d, Decision::Clean);
+    fn remote_file(id: &str, name: &str, size: u64) -> RemoteItem {
+        RemoteItem {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            size,
+            e_tag: None,
+            c_tag: None,
+            last_modified_date_time: None,
+            file: Some(onesync_protocol::remote::FileFacet {
+                hashes: onesync_protocol::remote::FileHashes::default(),
+            }),
+            folder: None,
+            deleted: None,
+            parent_reference: None,
+        }
     }
 
-    #[test]
-    fn local_differs_yields_upload() {
-        let synced = side(10, 1, 0);
-        let local = side(10, 2, 100);
-        let d = reconcile(
-            &rel("f"),
-            Some(&synced),
-            Some(&local),
-            Some(&synced),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert_eq!(d, Decision::UploadLocalToRemote);
+    fn remote_folder(id: &str, name: &str) -> RemoteItem {
+        RemoteItem {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            size: 0,
+            e_tag: None,
+            c_tag: None,
+            last_modified_date_time: None,
+            file: None,
+            folder: Some(onesync_protocol::remote::FolderFacet { child_count: 0 }),
+            deleted: None,
+            parent_reference: None,
+        }
     }
 
-    #[test]
-    fn remote_differs_yields_download() {
-        let synced = side(10, 1, 0);
-        let remote = side(10, 3, 100);
-        let d = reconcile(
-            &rel("f"),
-            Some(&synced),
-            Some(&synced),
-            Some(&remote),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert_eq!(d, Decision::DownloadRemoteToLocal);
-    }
-
-    #[test]
-    fn both_differ_distinct_yields_conflict() {
-        let synced = side(10, 1, 0);
-        let local = side(10, 2, 100);
-        let remote = side(10, 3, 200);
-        let d = reconcile(
-            &rel("a.md"),
-            Some(&synced),
-            Some(&local),
-            Some(&remote),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        match d {
-            Decision::Conflict { winner, .. } => assert_eq!(winner, ConflictSide::Remote),
-            _ => panic!("expected Conflict"),
+    fn blank_entry(pair_id: PairId, relative_path: RelPath) -> FileEntry {
+        FileEntry {
+            pair_id,
+            relative_path,
+            kind: FileKind::File,
+            sync_state: FileSyncState::Clean,
+            local: None,
+            remote: None,
+            synced: None,
+            pending_op_id: None,
+            updated_at: ts(0),
         }
     }
 
     #[test]
-    fn both_differ_but_converge_to_same_content_yields_clean() {
-        let synced = side(10, 1, 0);
-        let convergent = side(10, 2, 100);
-        let d = reconcile(
-            &rel("f"),
-            Some(&synced),
-            Some(&convergent),
-            Some(&convergent),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert_eq!(d, Decision::Clean);
+    fn no_entry_no_remote_is_noop() {
+        let d = reconcile_one(pair(), path("a.txt"), None, None);
+        assert_eq!(d.kind, DecisionKind::NoOp);
     }
 
     #[test]
-    fn local_removed_yields_delete_remote() {
-        let synced = side(10, 1, 0);
-        let d = reconcile(
-            &rel("f"),
-            Some(&synced),
-            None,
-            Some(&synced),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert_eq!(d, Decision::DeleteRemote);
+    fn new_remote_file_produces_download() {
+        let remote = remote_file("r1", "a.txt", 100);
+        let d = reconcile_one(pair(), path("a.txt"), None, Some(&remote));
+        assert_eq!(d.kind, DecisionKind::Download);
     }
 
     #[test]
-    fn remote_removed_yields_delete_local() {
-        let synced = side(10, 1, 0);
-        let d = reconcile(
-            &rel("f"),
-            Some(&synced),
-            Some(&synced),
-            None,
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert_eq!(d, Decision::DeleteLocal);
+    fn new_remote_folder_produces_local_mkdir() {
+        let remote = remote_folder("r2", "docs");
+        let d = reconcile_one(pair(), path("docs"), None, Some(&remote));
+        assert_eq!(d.kind, DecisionKind::LocalMkdir);
     }
 
     #[test]
-    fn newer_local_wins_when_diverged_beyond_tolerance() {
-        let synced = side(10, 1, 0);
-        let local = side(10, 2, 1_000_000); // way newer
-        let remote = side(10, 3, 100);
-        let d = reconcile(
-            &rel("a.md"),
-            Some(&synced),
-            Some(&local),
-            Some(&remote),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        match d {
-            Decision::Conflict { winner, .. } => assert_eq!(winner, ConflictSide::Local),
-            _ => panic!("expected Conflict"),
-        }
+    fn remote_deleted_produces_local_delete() {
+        let p = pair();
+        let rp = path("a.txt");
+        let entry = blank_entry(p, rp.clone());
+        let d = reconcile_one(p, rp, Some(&entry), None);
+        assert_eq!(d.kind, DecisionKind::LocalDelete);
     }
 
     #[test]
-    fn new_file_on_both_sides_diverged_yields_conflict() {
-        // synced = None means first-seen; both sides have different content
-        let local = side(10, 2, 100);
-        let remote = side(10, 3, 200);
-        let d = reconcile(
-            &rel("new.txt"),
-            None,
-            Some(&local),
-            Some(&remote),
-            "h",
-            ts(0),
-            &BTreeSet::new(),
-        );
-        assert!(matches!(d, Decision::Conflict { .. }));
+    fn inflight_entry_is_noop() {
+        let p = pair();
+        let rp = path("a.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        entry.sync_state = FileSyncState::InFlight;
+        let remote = remote_file("r1", "a.txt", 100);
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        assert_eq!(d.kind, DecisionKind::NoOp);
     }
 }

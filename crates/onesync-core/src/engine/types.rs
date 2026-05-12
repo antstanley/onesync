@@ -1,95 +1,147 @@
-//! Engine-internal types.
+//! Core data types shared across engine submodules.
 
 use onesync_protocol::{
-    enums::{RunOutcome, RunTrigger},
-    id::{PairId, SyncRunId},
+    enums::{ConflictSide, FileKind, FileOpKind},
+    id::PairId,
     path::RelPath,
     primitives::Timestamp,
 };
 
-use crate::ports::{GraphError, LocalFsError, StateError, VaultError};
-
-/// What the engine decided to do about one path during reconciliation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
-    /// Sides agree; no action required.
-    Clean,
-    /// Local content changed; upload to remote.
-    UploadLocalToRemote,
-    /// Remote content changed; download to local.
-    DownloadRemoteToLocal,
-    /// Local file removed; delete remote mirror.
-    DeleteRemote,
-    /// Remote file removed; delete local mirror.
-    DeleteLocal,
-    /// Both sides diverged from `synced`; apply keep-both conflict policy.
-    Conflict {
-        /// Side that wins the canonical path.
-        winner: ConflictSide,
-        /// The path the losing copy should be renamed to.
-        loser_target: RelPath,
-    },
-}
-
-/// Conflict winner — re-export of `onesync_protocol::enums::ConflictSide` for ergonomics.
-pub use onesync_protocol::enums::ConflictSide;
-
-/// Ordered list of operations to enqueue against a pair this cycle.
-#[derive(Debug, Default, Clone)]
-pub struct OpPlan {
-    /// Operations in execution order. Directories before their files.
-    pub ops: Vec<onesync_protocol::file_op::FileOp>,
-    /// True if planning was truncated because `MAX_QUEUE_DEPTH_PER_PAIR` was reached.
-    pub truncated: bool,
-}
-
-/// Summary returned by `run_cycle`.
-#[derive(Debug, Clone)]
-pub struct CycleSummary {
-    /// Identifier of this sync run.
-    pub run_id: SyncRunId,
-    /// Pair that was synced.
+/// A single reconciliation decision produced by [`crate::engine::reconcile`].
+///
+/// Decisions are pure data — no I/O is performed. The planner converts them
+/// into concrete [`FileOp`](onesync_protocol::file_op::FileOp) sequences.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decision {
+    /// Sync pair this decision belongs to.
     pub pair_id: PairId,
-    /// What triggered this cycle.
-    pub trigger: RunTrigger,
-    /// When the cycle started.
-    pub started_at: Timestamp,
-    /// When the cycle finished.
-    pub finished_at: Timestamp,
-    /// Terminal outcome.
-    pub outcome: RunOutcome,
-    /// Number of operations applied to the local side.
-    pub local_ops: u32,
-    /// Number of operations applied to the remote side.
-    pub remote_ops: u32,
-    /// Total bytes uploaded.
-    pub bytes_uploaded: u64,
-    /// Total bytes downloaded.
-    pub bytes_downloaded: u64,
+    /// Path the decision concerns.
+    pub relative_path: RelPath,
+    /// What to do.
+    pub kind: DecisionKind,
 }
 
-/// Top-level engine error. Maps from any port error, then surfaced by `run_cycle`.
+/// The action the engine has decided to take for one path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecisionKind {
+    /// Upload the local file to remote.
+    Upload,
+    /// Download the remote file to local disk.
+    Download,
+    /// Delete the file on the local side.
+    LocalDelete,
+    /// Delete the file on the remote side.
+    RemoteDelete,
+    /// Create a folder on the local side.
+    LocalMkdir,
+    /// Create a folder on the remote side.
+    RemoteMkdir,
+    /// Rename the file on the local side.
+    LocalRename {
+        /// New path.
+        new_path: RelPath,
+    },
+    /// Rename the file on the remote side.
+    RemoteRename {
+        /// New path.
+        new_path: RelPath,
+    },
+    /// A conflict was detected; resolve by keeping the winner and renaming the loser.
+    Conflict {
+        /// Which side's content is kept at `relative_path`.
+        winner: ConflictSide,
+        /// Path where the losing side is saved as a conflict copy.
+        loser_path: RelPath,
+    },
+    /// Both sides agree; nothing to do.
+    NoOp,
+}
+
+impl DecisionKind {
+    /// Map to the corresponding [`FileOpKind`] for non-conflict decisions.
+    ///
+    /// Returns `None` for [`DecisionKind::NoOp`] and [`DecisionKind::Conflict`].
+    #[must_use]
+    pub const fn to_file_op_kind(&self) -> Option<FileOpKind> {
+        match self {
+            Self::Upload => Some(FileOpKind::Upload),
+            Self::Download => Some(FileOpKind::Download),
+            Self::LocalDelete => Some(FileOpKind::LocalDelete),
+            Self::RemoteDelete => Some(FileOpKind::RemoteDelete),
+            Self::LocalMkdir => Some(FileOpKind::LocalMkdir),
+            Self::RemoteMkdir => Some(FileOpKind::RemoteMkdir),
+            Self::LocalRename { .. } => Some(FileOpKind::LocalRename),
+            Self::RemoteRename { .. } => Some(FileOpKind::RemoteRename),
+            Self::Conflict { .. } | Self::NoOp => None,
+        }
+    }
+}
+
+/// An ordered batch of decisions that the planner expands into `FileOp`s.
+#[derive(Clone, Debug, Default)]
+pub struct OpPlan {
+    /// Decisions in execution order (mkdir before create, delete after move, etc.).
+    pub decisions: Vec<Decision>,
+}
+
+/// Fatal or retriable errors produced by the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    /// State-store error.
-    #[error("state: {0}")]
-    State(#[from] StateError),
-    /// Local-filesystem error.
-    #[error("local fs: {0}")]
-    LocalFs(#[from] LocalFsError),
-    /// Microsoft Graph error.
-    #[error("graph: {0}")]
-    Graph(#[from] GraphError),
-    /// Token vault error.
-    #[error("vault: {0}")]
-    Vault(#[from] VaultError),
-    /// The pair is paused or in `Errored` state and the cycle was refused.
-    #[error("pair not runnable: {0}")]
-    PairNotRunnable(String),
-    /// Cycle exceeded `CYCLE_PHASE_TIMEOUT_MS` somewhere.
-    #[error("phase timeout: {phase}")]
-    PhaseTimeout {
-        /// The cycle phase that timed out.
-        phase: &'static str,
-    },
+    /// A port returned an error that the engine cannot recover from this cycle.
+    #[error("port error: {0}")]
+    Port(String),
+    /// The engine was asked to shut down mid-cycle.
+    #[error("shutting down")]
+    Shutdown,
+}
+
+/// Summary produced at the end of a successful sync cycle.
+#[derive(Debug, Default, Clone)]
+pub struct CycleSummary {
+    /// Number of items examined in the remote delta.
+    pub remote_items_seen: usize,
+    /// Number of local events processed.
+    pub local_events_seen: usize,
+    /// Number of file operations that were applied.
+    pub ops_applied: usize,
+    /// Number of conflicts detected this cycle.
+    pub conflicts_detected: usize,
+}
+
+/// Metadata about one file's mtime used by the conflict-detection heuristic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MtimePair {
+    /// Kind of the entry (file vs. directory).
+    pub kind: FileKind,
+    /// Local mtime.
+    pub local_mtime: Timestamp,
+    /// Remote mtime.
+    pub remote_mtime: Timestamp,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onesync_protocol::enums::FileOpKind;
+
+    #[test]
+    fn decision_kind_maps_to_file_op_kind() {
+        assert_eq!(
+            DecisionKind::Upload.to_file_op_kind(),
+            Some(FileOpKind::Upload)
+        );
+        assert_eq!(
+            DecisionKind::Download.to_file_op_kind(),
+            Some(FileOpKind::Download)
+        );
+        assert_eq!(DecisionKind::NoOp.to_file_op_kind(), None);
+        assert_eq!(
+            DecisionKind::Conflict {
+                winner: ConflictSide::Local,
+                loser_path: "a.txt".parse().unwrap(),
+            }
+            .to_file_op_kind(),
+            None
+        );
+    }
 }

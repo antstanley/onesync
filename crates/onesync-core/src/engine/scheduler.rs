@@ -1,101 +1,114 @@
-//! Per-pair owning task + `mpsc` trigger channel.
+//! Scheduler: `PairWorker` and `Trigger` types that drive periodic sync cycles.
 //!
-//! Each `Pair` has its own `mpsc` event channel and a single owning task.
-//! Cross-task IPC commands coordinate via this channel, never by taking the lock
-//! from outside the owning task.
-//!
-//! See [`docs/spec/03-sync-engine.md`](../../../../docs/spec/03-sync-engine.md) §Triggers and scheduling.
+//! A `PairWorker` owns one pair's state (id, root, cursor) and drives cycles
+//! via an internal `Trigger` channel. Populated fully in Task 5.
 
-use onesync_protocol::id::PairId;
+use onesync_protocol::{id::PairId, primitives::DeltaCursor};
 use tokio::sync::mpsc;
 
-use crate::limits::{LOCAL_DEBOUNCE_MS, REMOTE_DEBOUNCE_MS};
-
-/// A trigger that tells the engine to run a cycle for a pair.
-#[derive(Debug, Clone)]
+/// What caused a sync cycle to start.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Trigger {
-    /// A local filesystem event was observed.
-    LocalEvent,
-    /// A remote webhook notification arrived.
-    RemoteWebhook,
-    /// The scheduled poll interval fired.
+    /// Timer fired at the configured interval.
     Scheduled,
-    /// A CLI force-sync command was issued.
-    CliForce {
-        /// Whether to perform a full rescan rather than an incremental delta.
-        full_scan: bool,
-    },
-    /// The engine is retrying a previously failed cycle.
+    /// A local filesystem event was coalesced.
+    LocalEvent,
+    /// A remote webhook or poll detected a change.
+    RemoteWebhook,
+    /// User or CLI requested an immediate sync.
+    CliForce,
+    /// A previously-failed operation is being retried after backoff.
     BackoffRetry,
-    /// The pair worker should shut down cleanly.
+}
+
+/// Commands the control plane sends to a `PairWorker`.
+#[derive(Debug)]
+pub enum WorkerCommand {
+    /// Trigger a sync cycle for the given reason.
+    Sync(Trigger),
+    /// Pause further cycles until `Resume` is received.
+    Pause,
+    /// Resume a paused worker.
+    Resume,
+    /// Shut the worker down cleanly.
     Shutdown,
 }
 
-impl Trigger {
-    /// The debounce window in milliseconds for this trigger type, or `0` for none.
-    #[must_use]
-    pub const fn debounce_ms(&self) -> u64 {
-        match self {
-            Self::LocalEvent => LOCAL_DEBOUNCE_MS,
-            Self::RemoteWebhook => REMOTE_DEBOUNCE_MS,
-            Self::Scheduled | Self::CliForce { .. } | Self::BackoffRetry | Self::Shutdown => 0,
-        }
-    }
-}
-
-/// A handle to a pair's worker task. Callers send [`Trigger`]s through this handle.
-pub struct PairWorker {
-    /// The pair this worker is responsible for.
+/// Handle returned when spawning a `PairWorker`.
+pub struct PairWorkerHandle {
+    /// The pair this worker owns.
     pub pair_id: PairId,
-    /// Sender half of the trigger channel.
-    pub tx: mpsc::Sender<Trigger>,
+    /// Channel used to send commands to the worker task.
+    pub tx: mpsc::Sender<WorkerCommand>,
 }
 
-impl PairWorker {
-    /// Send a trigger to the worker task.
+impl PairWorkerHandle {
+    /// Send a sync trigger to the worker.
     ///
-    /// # Errors
-    ///
-    /// Returns a [`mpsc::error::SendError`] if the receiver has been dropped.
-    pub async fn nudge(&self, trigger: Trigger) -> Result<(), mpsc::error::SendError<Trigger>> {
-        self.tx.send(trigger).await
+    /// Returns `Err` if the worker has already shut down.
+    pub async fn trigger(
+        &self,
+        reason: Trigger,
+    ) -> Result<(), mpsc::error::SendError<WorkerCommand>> {
+        self.tx.send(WorkerCommand::Sync(reason)).await
     }
+
+    /// Request the worker to shut down.
+    ///
+    /// Returns `Err` if the channel is already closed.
+    pub async fn shutdown(&self) -> Result<(), mpsc::error::SendError<WorkerCommand>> {
+        self.tx.send(WorkerCommand::Shutdown).await
+    }
+}
+
+/// Per-pair mutable state carried by the worker task.
+#[derive(Debug, Default)]
+pub struct PairState {
+    /// Most recent delta cursor; `None` triggers a full rescan.
+    pub delta_cursor: Option<DeltaCursor>,
+    /// Whether this worker is currently paused.
+    pub paused: bool,
+}
+
+/// Spawn a `PairWorker` task for `pair_id`.
+///
+/// Returns a [`PairWorkerHandle`] the caller uses to send commands.
+/// The worker loop body is populated in Task 5.
+#[must_use]
+pub fn spawn_pair_worker(pair_id: PairId) -> PairWorkerHandle {
+    let (tx, mut rx) = mpsc::channel::<WorkerCommand>(32);
+    // Stub task: drain commands until the sender is dropped or Shutdown arrives.
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if matches!(cmd, WorkerCommand::Shutdown) {
+                break;
+            }
+        }
+    });
+    PairWorkerHandle { pair_id, tx }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onesync_protocol::id::{Id, PairTag};
     use ulid::Ulid;
 
-    fn pair_id() -> PairId {
-        Id::<PairTag>::from_ulid(Ulid::from(42u128))
-    }
-
-    #[test]
-    fn trigger_debounce_ms_local_event() {
-        assert_eq!(Trigger::LocalEvent.debounce_ms(), LOCAL_DEBOUNCE_MS);
-    }
-
-    #[test]
-    fn trigger_debounce_ms_remote_webhook() {
-        assert_eq!(Trigger::RemoteWebhook.debounce_ms(), REMOTE_DEBOUNCE_MS);
-    }
-
-    #[test]
-    fn trigger_debounce_ms_scheduled_is_zero() {
-        assert_eq!(Trigger::Scheduled.debounce_ms(), 0);
+    fn pair() -> PairId {
+        // LINT: Ulid::new() allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        PairId::from_ulid(Ulid::new())
     }
 
     #[tokio::test]
-    async fn nudge_delivers_trigger_to_receiver() {
-        let (tx, mut rx) = mpsc::channel::<Trigger>(8);
-        let worker = PairWorker {
-            pair_id: pair_id(),
-            tx,
-        };
-        worker.nudge(Trigger::Scheduled).await.unwrap();
-        let received = rx.recv().await.unwrap();
-        assert!(matches!(received, Trigger::Scheduled));
+    async fn pair_worker_handle_can_receive_shutdown() {
+        let handle = spawn_pair_worker(pair());
+        // Channel is buffered; send should not block.
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trigger_sync_sends_scheduled() {
+        let handle = spawn_pair_worker(pair());
+        handle.trigger(Trigger::Scheduled).await.unwrap();
     }
 }

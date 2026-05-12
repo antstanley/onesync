@@ -1,77 +1,98 @@
-//! Exponential backoff with full jitter, bounded by `RETRY_MAX_ATTEMPTS`.
-
-use std::time::Duration;
+//! Exponential-backoff retry helpers for transient port errors.
 
 use crate::limits::{RETRY_BACKOFF_BASE_MS, RETRY_MAX_ATTEMPTS};
 
-/// Returns the backoff delay for the given attempt number (0-indexed).
+/// Outcome of a single retry computation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// Try the operation immediately (first attempt).
+    Immediate,
+    /// Wait `delay_ms` milliseconds before the next attempt.
+    Backoff {
+        /// Milliseconds to wait before retrying.
+        delay_ms: u64,
+    },
+    /// No more attempts; propagate the last error.
+    Exhausted,
+}
+
+/// Compute the retry decision for `attempt` (0-indexed).
 ///
-/// `attempt = 0` → range `[0, base)` (small initial jitter).
-/// `attempt = N` → range `[0, base * 2^N)`.
-/// `attempt >= RETRY_MAX_ATTEMPTS` → `None` (caller stops retrying).
+/// Uses full-jitter exponential backoff:
+/// `delay = rand(0 .. BASE * 2^attempt)`, capped so it stays reasonable.
 ///
-/// `jitter` is a 0..=1.0 fraction sampled by the caller; the function multiplies
-/// `base * 2^attempt` by `jitter` so the same caller-supplied value yields a
-/// deterministic delay (the engine's `Clock` port doesn't provide RNG; the caller
-/// owns randomness).
+/// # Arguments
+///
+/// * `attempt` — how many attempts have already been made (0 = first try).
+/// * `jitter_fraction` — a value in `[0.0, 1.0)` supplied by the caller
+///   (typically from a random source) to apply jitter.
 #[must_use]
-pub fn backoff_delay(attempt: u32, jitter: f64) -> Option<Duration> {
-    if attempt >= RETRY_MAX_ATTEMPTS {
-        return None;
+pub fn retry_decision(attempt: u32, jitter_fraction: f64) -> RetryDecision {
+    if attempt == 0 {
+        return RetryDecision::Immediate;
     }
-    // Saturating shift so large `attempt` values don't overflow.
-    let cap_ms: u64 = RETRY_BACKOFF_BASE_MS
-        .checked_shl(attempt)
-        .unwrap_or(u64::MAX);
-    // LINT: f64 precision is adequate for millisecond scheduling; no correctness dependency.
+    if attempt >= RETRY_MAX_ATTEMPTS {
+        return RetryDecision::Exhausted;
+    }
+    // Exponential ceiling: BASE * 2^(attempt-1), but cap at 64× base.
+    let shift = attempt.saturating_sub(1).min(6);
+    let cap_factor: u64 = 1u64 << shift;
+    let ceiling_ms = RETRY_BACKOFF_BASE_MS.saturating_mul(cap_factor);
+    // Full jitter: uniform random in [0, ceiling_ms).
+    let jitter_fraction = jitter_fraction.clamp(0.0, 1.0 - f64::EPSILON);
+    // LINT: cast_precision_loss — ceiling_ms is at most 64_000, well within f64 precision.
+    // LINT: cast_possible_truncation and cast_sign_loss — jitter_fraction is in [0,1).
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    let jittered_ms = (cap_ms as f64 * jitter.clamp(0.0, 1.0)) as u64;
-    Some(Duration::from_millis(jittered_ms))
+    let delay_ms = (jitter_fraction * ceiling_ms as f64) as u64;
+    RetryDecision::Backoff { delay_ms }
+}
+
+/// Return `true` if `attempt` is still within the retry budget.
+#[must_use]
+pub const fn should_retry(attempt: u32) -> bool {
+    attempt < RETRY_MAX_ATTEMPTS
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 
     #[test]
-    fn first_attempt_is_within_base() {
-        let d = backoff_delay(0, 1.0).expect("present");
-        assert!(u64::try_from(d.as_millis()).unwrap() <= RETRY_BACKOFF_BASE_MS);
+    fn first_attempt_is_immediate() {
+        assert_eq!(retry_decision(0, 0.5), RetryDecision::Immediate);
     }
 
     #[test]
-    fn delay_doubles_each_attempt() {
-        let d0 = backoff_delay(0, 1.0).expect("0");
-        let d1 = backoff_delay(1, 1.0).expect("1");
-        let d2 = backoff_delay(2, 1.0).expect("2");
-        // jitter = 1.0 returns the cap exactly.
+    fn exhausted_at_max_attempts() {
         assert_eq!(
-            u64::try_from(d0.as_millis()).unwrap(),
-            RETRY_BACKOFF_BASE_MS
-        );
-        assert_eq!(
-            u64::try_from(d1.as_millis()).unwrap(),
-            RETRY_BACKOFF_BASE_MS * 2
-        );
-        assert_eq!(
-            u64::try_from(d2.as_millis()).unwrap(),
-            RETRY_BACKOFF_BASE_MS * 4
+            retry_decision(RETRY_MAX_ATTEMPTS, 0.5),
+            RetryDecision::Exhausted
         );
     }
 
     #[test]
-    fn zero_jitter_yields_zero_delay() {
-        let d = backoff_delay(3, 0.0).expect("present");
-        assert_eq!(d.as_millis(), 0);
+    fn backoff_delay_is_within_ceiling() {
+        for attempt in 1..RETRY_MAX_ATTEMPTS {
+            let shift = attempt.saturating_sub(1).min(6);
+            let cap_factor: u64 = 1u64 << shift;
+            let ceiling = RETRY_BACKOFF_BASE_MS.saturating_mul(cap_factor);
+            let RetryDecision::Backoff { delay_ms } = retry_decision(attempt, 0.9999) else {
+                panic!("expected Backoff for attempt={attempt}");
+            };
+            assert!(delay_ms < ceiling, "delay {delay_ms} >= ceiling {ceiling}");
+        }
     }
 
     #[test]
-    fn beyond_max_attempts_returns_none() {
-        assert!(backoff_delay(RETRY_MAX_ATTEMPTS, 1.0).is_none());
-        assert!(backoff_delay(RETRY_MAX_ATTEMPTS + 5, 1.0).is_none());
+    fn zero_jitter_gives_zero_delay() {
+        let RetryDecision::Backoff { delay_ms } = retry_decision(1, 0.0) else {
+            panic!("expected Backoff");
+        };
+        assert_eq!(delay_ms, 0);
     }
 }

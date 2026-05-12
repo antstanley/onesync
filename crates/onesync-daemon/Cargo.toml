@@ -1,0 +1,45 @@
+[package]
+name = "onesync-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "onesyncd — the onesync background daemon."
+
+[lib]
+name = "onesync_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "onesyncd"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+onesync-core     = { path = "../onesync-core" }
+onesync-protocol = { path = "../onesync-protocol" }
+onesync-state    = { path = "../onesync-state" }
+onesync-fs-local = { path = "../onesync-fs-local" }
+onesync-graph    = { path = "../onesync-graph" }
+onesync-keychain = { path = "../onesync-keychain" }
+onesync-time     = { path = "../onesync-time" }
+anyhow           = { workspace = true }
+async-trait      = { workspace = true }
+clap             = { workspace = true }
+fs2              = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true, features = ["io-util", "net", "macros", "rt-multi-thread", "sync", "time", "signal"] }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }
+onesync-state = { path = "../onesync-state", features = ["fakes"] }
+onesync-time  = { path = "../onesync-time" }
+chrono        = { workspace = true }

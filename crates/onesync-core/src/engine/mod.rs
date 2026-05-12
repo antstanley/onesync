@@ -1,9 +1,7 @@
-//! Pure-logic sync engine.
+//! Sync-engine: orchestrates delta polling, conflict detection, and file I/O.
 //!
-//! Owns the per-pair cycle, reconciliation, conflict policy, retry/backoff,
-//! and op planning. Has no I/O — composes the port traits.
-//!
-//! See [`docs/spec/03-sync-engine.md`](../../../../docs/spec/03-sync-engine.md).
+//! The engine is pure logic — all I/O flows through port traits injected by the
+//! daemon wiring layer. Internal submodules are kept small and single-purpose.
 
 pub mod conflict;
 pub mod cycle;
@@ -14,3 +12,6 @@ pub mod reconcile;
 pub mod retry;
 pub mod scheduler;
 pub mod types;
+
+pub use cycle::run_cycle;
+pub use types::{CycleSummary, EngineError};

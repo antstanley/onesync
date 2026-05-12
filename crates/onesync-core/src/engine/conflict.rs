@@ -1,83 +1,96 @@
-//! Keep-both conflict loser-rename policy.
+//! Conflict-detection and loser-rename policy.
 
-use std::collections::BTreeSet;
+use onesync_protocol::{
+    enums::ConflictSide,
+    path::{PathParseError, RelPath},
+    primitives::Timestamp,
+};
 
-use onesync_protocol::{path::RelPath, primitives::Timestamp};
+use crate::limits::{CONFLICT_MTIME_TOLERANCE_MS, CONFLICT_RENAME_RETRIES};
 
-use crate::limits::CONFLICT_RENAME_RETRIES;
-
-/// Compute the rename target for a conflict loser.
+/// Choose which side wins and produce the loser's rename path.
 ///
-/// `existing` is the set of paths already in use under the same parent — pass an
-/// empty set if no collision check is needed at the call site.
+/// The winner is the side whose `mtime` is strictly newer by more than
+/// [`CONFLICT_MTIME_TOLERANCE_MS`]. When the difference is within the
+/// tolerance window the remote side wins (server is authoritative).
 ///
-/// Returns `None` if `CONFLICT_RENAME_RETRIES` collisions occurred.
-#[must_use]
-pub fn loser_rename_target(
+/// # Arguments
+///
+/// * `local_mtime` — last-modified time of the local file.
+/// * `remote_mtime` — last-modified time of the remote file.
+/// * `relative_path` — path where both copies currently live.
+/// * `host_name` — short host identifier used to disambiguate the loser copy.
+/// * `attempt` — zero-indexed retry counter; appended to the loser name when > 0.
+///
+/// # Errors
+///
+/// Returns [`PathParseError`] if the constructed loser path is invalid.
+pub fn pick_winner_and_loser(
+    local_mtime: Timestamp,
+    remote_mtime: Timestamp,
     relative_path: &RelPath,
-    detected_at: Timestamp,
-    host: &str,
-    existing: &BTreeSet<RelPath>,
-) -> Option<RelPath> {
-    let (stem, ext) = split_stem_ext(relative_path.as_str());
-    let ts = format_filename_timestamp(&detected_at);
-    let base = format_conflict_name(stem, &ts, host, ext);
-    if let Ok(candidate) = base.parse::<RelPath>()
-        && !existing.contains(&candidate)
-    {
-        return Some(candidate);
-    }
-    for i in 2..=CONFLICT_RENAME_RETRIES {
-        let with_suffix = format_conflict_name_with_suffix(stem, &ts, host, ext, i);
-        if let Ok(candidate) = with_suffix.parse::<RelPath>()
-            && !existing.contains(&candidate)
-        {
-            return Some(candidate);
-        }
-    }
-    None
+    host_name: &str,
+    attempt: u32,
+) -> Result<ConflictOutcome, PathParseError> {
+    let local_dt = local_mtime.into_inner();
+    let remote_dt = remote_mtime.into_inner();
+    let diff_ms = (local_dt - remote_dt).num_milliseconds().unsigned_abs();
+
+    let winner = if diff_ms > CONFLICT_MTIME_TOLERANCE_MS && local_dt > remote_dt {
+        ConflictSide::Local
+    } else {
+        ConflictSide::Remote
+    };
+
+    let loser_path = build_loser_path(relative_path, host_name, attempt)?;
+    Ok(ConflictOutcome { winner, loser_path })
 }
 
-fn split_stem_ext(path: &str) -> (&str, Option<&str>) {
-    // Find the last '.' in the basename, not in the directory.
-    let basename_start = path.rfind('/').map_or(0, |i| i + 1);
-    let basename = &path[basename_start..];
-    if let Some(dot_in_basename) = basename.rfind('.') {
-        if dot_in_basename == 0 {
-            // dotfile like ".bashrc" — no extension.
-            return (path, None);
-        }
-        let abs_dot = basename_start + dot_in_basename;
-        return (&path[..abs_dot], Some(&path[abs_dot + 1..]));
-    }
-    (path, None)
+/// Outcome of the conflict-winner selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictOutcome {
+    /// Side whose content is kept at the original path.
+    pub winner: ConflictSide,
+    /// Path where the losing copy is saved.
+    pub loser_path: RelPath,
 }
 
-fn format_filename_timestamp(ts: &Timestamp) -> String {
-    // YYYY-MM-DDTHH-MM-SSZ (filename-safe — no colons)
-    ts.into_inner().format("%Y-%m-%dT%H-%M-%SZ").to_string()
+/// Build the loser rename path.
+///
+/// Pattern: `<stem> (conflict copy from <host_name>)[.<attempt>].<ext>`
+///
+/// # Errors
+///
+/// Returns [`PathParseError`] if the constructed path is invalid.
+pub fn build_loser_path(
+    original: &RelPath,
+    host_name: &str,
+    attempt: u32,
+) -> Result<RelPath, PathParseError> {
+    let s = original.as_str();
+    let (dir, file) = s.rfind('/').map_or(("", s), |i| (&s[..i], &s[i + 1..]));
+    let (stem, ext) = file
+        .rfind('.')
+        .map_or((file, ""), |i| (&file[..i], &file[i..]));
+
+    let suffix = if attempt == 0 {
+        String::new()
+    } else {
+        format!(".{attempt}")
+    };
+    let loser_name = format!("{stem} (conflict copy from {host_name}){suffix}{ext}");
+    let loser_path = if dir.is_empty() {
+        loser_name
+    } else {
+        format!("{dir}/{loser_name}")
+    };
+    loser_path.parse()
 }
 
-fn format_conflict_name(stem: &str, ts: &str, host: &str, ext: Option<&str>) -> String {
-    let base = format!("{stem} (conflict {ts} from {host})");
-    match ext {
-        Some(e) => format!("{base}.{e}"),
-        None => base,
-    }
-}
-
-fn format_conflict_name_with_suffix(
-    stem: &str,
-    ts: &str,
-    host: &str,
-    ext: Option<&str>,
-    suffix: u32,
-) -> String {
-    let base = format!("{stem} (conflict {ts} from {host})-{suffix}");
-    match ext {
-        Some(e) => format!("{base}.{e}"),
-        None => base,
-    }
+/// Return the maximum number of loser-rename attempts.
+#[must_use]
+pub const fn rename_retry_limit() -> u32 {
+    CONFLICT_RENAME_RETRIES
 }
 
 #[cfg(test)]
@@ -89,78 +102,54 @@ mod tests {
         Timestamp::from_datetime(Utc.timestamp_opt(secs, 0).unwrap())
     }
 
-    fn rel(s: &str) -> RelPath {
-        s.parse().expect("rel")
+    fn relpath(s: &str) -> RelPath {
+        s.parse().unwrap()
     }
 
     #[test]
-    fn split_stem_ext_handles_extensions() {
-        assert_eq!(split_stem_ext("notes.md"), ("notes", Some("md")));
-        assert_eq!(
-            split_stem_ext("dir/file.tar.gz"),
-            ("dir/file.tar", Some("gz"))
+    fn local_wins_when_clearly_newer() {
+        // local is 5 s newer, tolerance is 1 s
+        let out = pick_winner_and_loser(ts(1000), ts(995), &relpath("doc.txt"), "mac", 0).unwrap();
+        assert_eq!(out.winner, ConflictSide::Local);
+    }
+
+    #[test]
+    fn remote_wins_within_tolerance() {
+        // 500 ms difference — within 1 s tolerance
+        let local = Timestamp::from_datetime(
+            Utc.timestamp_opt(1000, 0).unwrap() + chrono::Duration::milliseconds(500),
         );
-        assert_eq!(split_stem_ext("noext"), ("noext", None));
-        assert_eq!(split_stem_ext(".bashrc"), (".bashrc", None));
+        let remote = Timestamp::from_datetime(Utc.timestamp_opt(1000, 0).unwrap());
+        let out = pick_winner_and_loser(local, remote, &relpath("doc.txt"), "mac", 0).unwrap();
+        assert_eq!(out.winner, ConflictSide::Remote);
     }
 
     #[test]
-    fn rename_target_includes_timestamp_and_host() {
-        let target = loser_rename_target(
-            &rel("Documents/notes.md"),
-            ts(1_700_000_000),
-            "alice-mac",
-            &BTreeSet::new(),
-        )
-        .expect("present");
-        assert!(target.as_str().contains("notes (conflict"));
-        assert!(target.as_str().contains("from alice-mac"));
-        // LINT: extension comparison is intentionally exact in tests.
-        #[allow(clippy::case_sensitive_file_extension_comparisons)]
-        let has_md_ext = target.as_str().ends_with(".md");
-        assert!(has_md_ext);
+    fn remote_wins_when_clearly_newer() {
+        let out = pick_winner_and_loser(ts(990), ts(1000), &relpath("doc.txt"), "mac", 0).unwrap();
+        assert_eq!(out.winner, ConflictSide::Remote);
     }
 
     #[test]
-    fn collision_gets_numeric_suffix() {
-        let mut existing = BTreeSet::new();
-        let original = rel("file.txt");
-        let t = ts(1_700_000_000);
-
-        let first = loser_rename_target(&original, t, "host", &existing).expect("first");
-        existing.insert(first.clone());
-
-        let second = loser_rename_target(&original, t, "host", &existing).expect("second");
-        assert_ne!(second, first);
-        assert!(second.as_str().contains("-2"));
+    fn loser_path_has_conflict_suffix() {
+        let p = build_loser_path(&relpath("docs/notes.txt"), "macbook", 0).unwrap();
+        assert_eq!(p.as_str(), "docs/notes (conflict copy from macbook).txt");
     }
 
     #[test]
-    fn exhausted_retries_returns_none_or_some() {
-        // Insert all possible candidates for the given timestamp and host.
-        let mut existing = BTreeSet::new();
-        let original = rel("file.txt");
-        let t = ts(1_700_000_000);
+    fn loser_path_includes_attempt_when_nonzero() {
+        let p = build_loser_path(&relpath("docs/notes.txt"), "macbook", 2).unwrap();
+        assert_eq!(p.as_str(), "docs/notes (conflict copy from macbook).2.txt");
+    }
 
-        // Insert the base candidate.
-        let first = loser_rename_target(&original, t, "host", &existing).expect("first");
-        existing.insert(first);
+    #[test]
+    fn loser_path_no_directory_component() {
+        let p = build_loser_path(&relpath("file.md"), "host", 0).unwrap();
+        assert_eq!(p.as_str(), "file (conflict copy from host).md");
+    }
 
-        // Insert all numbered candidates up to and including CONFLICT_RENAME_RETRIES.
-        for i in 2..=CONFLICT_RENAME_RETRIES {
-            let ts_str =
-                Timestamp::from_datetime(chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap())
-                    .into_inner()
-                    .format("%Y-%m-%dT%H-%M-%SZ")
-                    .to_string();
-            let candidate_str = format!("file (conflict {ts_str} from host)-{i}.txt");
-            if let Ok(p) = candidate_str.parse::<RelPath>() {
-                existing.insert(p);
-            }
-        }
-
-        // With all slots taken, should return None.
-        let result = loser_rename_target(&original, t, "host", &existing);
-        assert!(result.is_none());
+    #[test]
+    fn rename_retry_limit_equals_const() {
+        assert_eq!(rename_retry_limit(), CONFLICT_RENAME_RETRIES);
     }
 }

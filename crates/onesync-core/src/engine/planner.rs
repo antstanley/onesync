@@ -1,207 +1,190 @@
-//! Planner: `Decision` list → `Vec<FileOp>`.
+//! Planner: converts a list of [`Decision`]s into an ordered [`Vec<FileOp>`].
+//!
+//! Ordering rules (applied in sequence):
+//! 1. `LocalMkdir` / `RemoteMkdir` before any file operations in that directory.
+//! 2. Deletions after moves/creates that replace the deleted path.
+//! 3. All other operations are appended in input order.
+//!
+//! The planner is synchronous and pure: it does no I/O.
 
 use onesync_protocol::{
-    enums::{ConflictSide, FileOpKind, FileOpStatus},
+    enums::{FileOpKind, FileOpStatus},
     file_op::FileOp,
-    id::{PairId, SyncRunId},
+    id::{FileOpId, PairId, SyncRunId},
     path::RelPath,
     primitives::Timestamp,
 };
 
-use crate::engine::types::{Decision, OpPlan};
-use crate::limits::MAX_QUEUE_DEPTH_PER_PAIR;
-use crate::ports::{Clock, IdGenerator};
+use crate::{engine::types::Decision, ports::IdGenerator};
 
-/// Convert a list of `(RelPath, Decision)` pairs into an ordered `OpPlan`.
+/// Expand `decisions` into an ordered sequence of [`FileOp`]s.
 ///
-/// Sorting rule: shorter paths first (directories before their children).
-/// Truncation: stops at `MAX_QUEUE_DEPTH_PER_PAIR` total ops, sets `truncated = true`.
+/// `run_id` and `now` are stamped onto every op. `ids` supplies fresh
+/// [`FileOpId`] values (one per op).
+///
+/// `I` must implement [`IdGenerator`]; a generic parameter is required because
+/// [`IdGenerator`] is not dyn-compatible (its `new_id` method is generic).
+#[must_use]
 pub fn plan<I: IdGenerator>(
-    decisions: Vec<(RelPath, Decision)>,
-    pair_id: PairId,
+    decisions: Vec<Decision>,
     run_id: SyncRunId,
-    clock: &dyn Clock,
+    now: Timestamp,
     ids: &I,
-) -> OpPlan {
-    let now = clock.now();
-    let mut ops: Vec<FileOp> = Vec::new();
-    let mut truncated = false;
+) -> Vec<FileOp> {
+    let mut mkdir_ops: Vec<FileOp> = Vec::new();
+    let mut delete_ops: Vec<FileOp> = Vec::new();
+    let mut other_ops: Vec<FileOp> = Vec::new();
 
-    // Sort decisions: parents (shorter paths) before children.
-    let mut sorted = decisions;
-    sorted.sort_by_key(|(p, _)| p.as_str().len());
+    for decision in decisions {
+        let Some(kind) = decision.kind.to_file_op_kind() else {
+            // NoOp and Conflict (caller resolves conflict separately).
+            continue;
+        };
 
-    'outer: for (path, decision) in sorted {
-        let new_ops = decision_to_ops(&path, decision, pair_id, run_id, ids, now);
-        for op in new_ops {
-            if ops.len() >= MAX_QUEUE_DEPTH_PER_PAIR {
-                truncated = true;
-                break 'outer;
-            }
-            ops.push(op);
+        let op = make_op(
+            ids.new_id(),
+            run_id,
+            decision.pair_id,
+            decision.relative_path,
+            kind,
+            now,
+        );
+
+        match kind {
+            FileOpKind::LocalMkdir | FileOpKind::RemoteMkdir => mkdir_ops.push(op),
+            FileOpKind::LocalDelete | FileOpKind::RemoteDelete => delete_ops.push(op),
+            _ => other_ops.push(op),
         }
     }
 
-    OpPlan { ops, truncated }
+    // mkdir first, then creates/uploads/downloads/renames, then deletes.
+    mkdir_ops.extend(other_ops);
+    mkdir_ops.extend(delete_ops);
+    mkdir_ops
 }
 
-fn decision_to_ops<I: IdGenerator>(
-    path: &RelPath,
-    decision: Decision,
-    pair_id: PairId,
+fn make_op(
+    id: FileOpId,
     run_id: SyncRunId,
-    ids: &I,
+    pair_id: PairId,
+    relative_path: RelPath,
+    kind: FileOpKind,
     now: Timestamp,
-) -> Vec<FileOp> {
-    let mk = |kind: FileOpKind| FileOp {
-        id: ids.new_id(),
+) -> FileOp {
+    FileOp {
+        id,
         run_id,
         pair_id,
-        relative_path: path.clone(),
+        relative_path,
         kind,
         status: FileOpStatus::Enqueued,
         attempts: 0,
         last_error: None,
-        metadata: serde_json::Map::default(),
+        metadata: serde_json::Map::new(),
         enqueued_at: now,
         started_at: None,
         finished_at: None,
-    };
-
-    match decision {
-        Decision::Clean => Vec::new(),
-        Decision::UploadLocalToRemote => vec![mk(FileOpKind::Upload)],
-        Decision::DownloadRemoteToLocal => vec![mk(FileOpKind::Download)],
-        Decision::DeleteRemote => vec![mk(FileOpKind::RemoteDelete)],
-        Decision::DeleteLocal => vec![mk(FileOpKind::LocalDelete)],
-        Decision::Conflict {
-            winner,
-            loser_target,
-        } => {
-            // 1. Rename the loser on its own side first.
-            // 2. Propagate the winner's content to the loser's side (overwrite).
-            let rename_op = match winner {
-                ConflictSide::Local => mk(FileOpKind::RemoteRename),
-                ConflictSide::Remote => mk(FileOpKind::LocalRename),
-            };
-            let propagate_op = match winner {
-                ConflictSide::Local => mk(FileOpKind::Upload),
-                ConflictSide::Remote => mk(FileOpKind::Download),
-            };
-            // Embed the loser target path in rename_op.metadata so the executor knows.
-            let mut rename_op = rename_op;
-            let mut meta = serde_json::Map::default();
-            meta.insert(
-                "loser_target".into(),
-                serde_json::Value::String(loser_target.as_str().to_owned()),
-            );
-            rename_op.metadata = meta;
-            vec![rename_op, propagate_op]
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::types::ConflictSide;
     use chrono::{TimeZone, Utc};
     use onesync_protocol::{
-        id::{Id, PairTag, SyncRunTag},
-        path::RelPath,
+        enums::FileOpKind,
+        id::{Id, IdPrefix, PairId, SyncRunId},
         primitives::Timestamp,
     };
     use ulid::Ulid;
 
-    struct FakeIds {
-        counter: std::sync::Mutex<u64>,
-    }
-    impl FakeIds {
+    use crate::engine::types::{Decision, DecisionKind};
+
+    struct SeqIds(std::sync::atomic::AtomicU64);
+
+    impl SeqIds {
         fn new() -> Self {
-            Self {
-                counter: std::sync::Mutex::new(0),
-            }
-        }
-    }
-    impl IdGenerator for FakeIds {
-        fn new_id<T: onesync_protocol::id::IdPrefix + 'static>(
-            &self,
-        ) -> onesync_protocol::id::Id<T> {
-            let mut guard = self.counter.lock().expect("lock");
-            *guard += 1;
-            let n = *guard;
-            drop(guard);
-            // LINT: u64 → u128 widening, no truncation.
-            #[allow(clippy::cast_lossless)]
-            Id::from_ulid(Ulid::from(n as u128))
+            Self(std::sync::atomic::AtomicU64::new(1))
         }
     }
 
-    struct FakeClock;
-    impl crate::ports::Clock for FakeClock {
-        fn now(&self) -> Timestamp {
-            Timestamp::from_datetime(Utc.with_ymd_and_hms(2026, 5, 12, 0, 0, 0).unwrap())
+    impl IdGenerator for SeqIds {
+        fn new_id<T: IdPrefix + 'static>(&self) -> Id<T> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Construct a deterministic ULID from the counter for test purposes.
+            // LINT: wrapping is fine — test only.
+            #[allow(clippy::disallowed_methods)]
+            let ulid = Ulid::from_parts(n, 0);
+            Id::from_ulid(ulid)
         }
     }
 
-    fn pair_id() -> PairId {
-        Id::<PairTag>::from_ulid(Ulid::from(1u128))
+    fn pair() -> PairId {
+        // LINT: Ulid::new() allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        PairId::from_ulid(Ulid::new())
     }
-    fn run_id() -> SyncRunId {
-        Id::<SyncRunTag>::from_ulid(Ulid::from(2u128))
+
+    fn run() -> SyncRunId {
+        // LINT: Ulid::new() allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        SyncRunId::from_ulid(Ulid::new())
     }
-    fn rel(s: &str) -> RelPath {
-        s.parse().expect("rel")
+
+    fn now() -> Timestamp {
+        // LINT: Utc::now() allowed in tests.
+        #[allow(clippy::disallowed_methods)]
+        Timestamp::from_datetime(Utc.timestamp_opt(1_700_000_000, 0).unwrap())
+    }
+
+    fn decision(p: PairId, path: &str, kind: DecisionKind) -> Decision {
+        Decision {
+            pair_id: p,
+            relative_path: path.parse().unwrap(),
+            kind,
+        }
     }
 
     #[test]
-    fn clean_decision_produces_no_ops() {
-        let decisions = vec![(rel("a.txt"), Decision::Clean)];
-        let plan = plan(decisions, pair_id(), run_id(), &FakeClock, &FakeIds::new());
-        assert!(plan.ops.is_empty());
-        assert!(!plan.truncated);
+    fn noop_decisions_produce_no_ops() {
+        let p = pair();
+        let decisions = vec![decision(p, "a.txt", DecisionKind::NoOp)];
+        let ops = plan(decisions, run(), now(), &SeqIds::new());
+        assert!(ops.is_empty());
     }
 
     #[test]
-    fn upload_decision_produces_one_op() {
-        let decisions = vec![(rel("a.txt"), Decision::UploadLocalToRemote)];
-        let plan = plan(decisions, pair_id(), run_id(), &FakeClock, &FakeIds::new());
-        assert_eq!(plan.ops.len(), 1);
-        assert_eq!(plan.ops[0].kind, FileOpKind::Upload);
-        assert!(!plan.truncated);
+    fn mkdir_ops_precede_file_ops() {
+        let p = pair();
+        let decisions = vec![
+            decision(p, "docs/file.txt", DecisionKind::Download),
+            decision(p, "docs", DecisionKind::LocalMkdir),
+        ];
+        let ops = plan(decisions, run(), now(), &SeqIds::new());
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].kind, FileOpKind::LocalMkdir);
+        assert_eq!(ops[1].kind, FileOpKind::Download);
     }
 
     #[test]
-    fn conflict_produces_two_ops_rename_first() {
-        let decisions = vec![(
-            rel("a.txt"),
-            Decision::Conflict {
-                winner: ConflictSide::Local,
-                loser_target: rel("a (conflict 2026-01-01T00-00-00Z from host).txt"),
-            },
-        )];
-        let plan = plan(decisions, pair_id(), run_id(), &FakeClock, &FakeIds::new());
-        assert_eq!(plan.ops.len(), 2);
-        // First op renames the remote loser.
-        assert_eq!(plan.ops[0].kind, FileOpKind::RemoteRename);
-        assert!(plan.ops[0].metadata.contains_key("loser_target"));
-        // Second op uploads the local winner.
-        assert_eq!(plan.ops[1].kind, FileOpKind::Upload);
+    fn delete_ops_come_last() {
+        let p = pair();
+        let decisions = vec![
+            decision(p, "old.txt", DecisionKind::LocalDelete),
+            decision(p, "new.txt", DecisionKind::Upload),
+        ];
+        let ops = plan(decisions, run(), now(), &SeqIds::new());
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].kind, FileOpKind::Upload);
+        assert_eq!(ops[1].kind, FileOpKind::LocalDelete);
     }
 
     #[test]
-    fn truncation_at_max_queue_depth() {
-        // Create MAX_QUEUE_DEPTH_PER_PAIR + 1 decisions.
-        let decisions: Vec<(RelPath, Decision)> = (0..=MAX_QUEUE_DEPTH_PER_PAIR)
-            .map(|i| {
-                (
-                    format!("file{i}.txt").parse::<RelPath>().expect("rel"),
-                    Decision::UploadLocalToRemote,
-                )
-            })
-            .collect();
-        let plan = plan(decisions, pair_id(), run_id(), &FakeClock, &FakeIds::new());
-        assert_eq!(plan.ops.len(), MAX_QUEUE_DEPTH_PER_PAIR);
-        assert!(plan.truncated);
+    fn ops_have_enqueued_status_and_zero_attempts() {
+        let p = pair();
+        let decisions = vec![decision(p, "a.txt", DecisionKind::Upload)];
+        let ops = plan(decisions, run(), now(), &SeqIds::new());
+        assert_eq!(ops[0].status, FileOpStatus::Enqueued);
+        assert_eq!(ops[0].attempts, 0);
     }
 }
