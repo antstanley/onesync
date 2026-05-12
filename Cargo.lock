@@ -1019,6 +1019,7 @@ dependencies = [
  "chrono",
  "onesync-core",
  "onesync-protocol",
+ "onesync-time",
  "proptest",
  "r2d2",
  "r2d2_sqlite",
