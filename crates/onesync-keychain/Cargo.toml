@@ -1,0 +1,22 @@
+[package]
+name = "onesync-keychain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+onesync-core     = { path = "../onesync-core" }
+onesync-protocol = { path = "../onesync-protocol" }
+async-trait      = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
