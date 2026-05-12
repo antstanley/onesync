@@ -4,9 +4,12 @@
 //! The async dispatch lives in `crate::store::SqliteStore` (Task 8).
 
 pub mod accounts;
+pub mod audit;
+pub mod conflicts;
 pub mod file_entries;
 pub mod file_ops;
 pub mod pairs;
+pub mod sync_runs;
 
 /// Parse an ISO-8601 timestamp from a `SQLite` TEXT column into a typed `Timestamp`.
 pub(crate) fn parse_timestamp(
