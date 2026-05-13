@@ -315,11 +315,55 @@ async fn run_one_pair_inner(
         "scheduler: cycle complete"
     );
 
+    // Persist the new delta cursor + lifecycle transitions. The cycle itself does not
+    // touch the Pair row; the scheduler is the single writer of post-cycle state.
+    persist_post_cycle(inputs.state.as_ref(), inputs.clock.as_ref(), &pair, &summary).await;
+
     // Emit a per-pair audit event for each symlink skipped during this cycle's scan.
     // Per the 01-domain-model decision: scanner skips with a warning audit event.
     emit_symlink_skips(inputs, &pair).await;
 
     Ok(())
+}
+
+/// Apply post-cycle bookkeeping to the pair row: persist the new delta cursor, update
+/// `last_sync_at`, and flip `Initializing -> Active` once we have a stable cursor to
+/// resume from. A no-op if neither change is needed.
+pub(crate) async fn persist_post_cycle(
+    state: &dyn StateStore,
+    clock: &dyn Clock,
+    pair: &onesync_protocol::pair::Pair,
+    summary: &onesync_core::engine::CycleSummary,
+) {
+    let now = clock.now();
+    let new_cursor = summary
+        .delta_token
+        .clone()
+        .or_else(|| pair.delta_token.clone());
+    let promote_to_active =
+        pair.status == PairStatus::Initializing && summary.delta_token.is_some();
+
+    if !promote_to_active && new_cursor == pair.delta_token {
+        return;
+    }
+
+    let updated = onesync_protocol::pair::Pair {
+        status: if promote_to_active {
+            PairStatus::Active
+        } else {
+            pair.status
+        },
+        delta_token: new_cursor,
+        last_sync_at: Some(now),
+        updated_at: now,
+        ..pair.clone()
+    };
+
+    if let Err(e) = state.pair_upsert(&updated).await {
+        tracing::warn!(pair = %pair.id, error = %e, "scheduler: pair_upsert post-cycle failed");
+    } else if promote_to_active {
+        tracing::info!(pair = %pair.id, "scheduler: pair promoted Initializing -> Active");
+    }
 }
 
 /// Walk the pair root, emit one `local.symlink.skipped` audit event per encountered symlink.
@@ -426,5 +470,118 @@ impl TokenSource for VaultBackedTokenSource {
             *guard = Some(new);
         }
         Ok(access)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+    use onesync_core::engine::CycleSummary;
+    use onesync_core::ports::IdGenerator;
+    use onesync_protocol::{
+        id::{AccountId, AccountTag, PairTag},
+        path::AbsPath,
+        primitives::{DeltaCursor, DriveItemId, Timestamp},
+    };
+    use onesync_state::fakes::InMemoryStore;
+
+    struct FixedClock(Timestamp);
+    impl Clock for FixedClock {
+        fn now(&self) -> Timestamp {
+            self.0
+        }
+    }
+
+    fn pair_id() -> PairId {
+        UlidGenerator::default().new_id::<PairTag>()
+    }
+    fn account_id() -> AccountId {
+        UlidGenerator::default().new_id::<AccountTag>()
+    }
+    fn ts(secs: i64) -> Timestamp {
+        Timestamp::from_datetime(chrono::DateTime::from_timestamp(secs, 0).unwrap())
+    }
+
+    fn initializing_pair() -> onesync_protocol::pair::Pair {
+        onesync_protocol::pair::Pair {
+            id: pair_id(),
+            account_id: account_id(),
+            local_path: "/tmp/m12b-pair".parse::<AbsPath>().unwrap(),
+            remote_item_id: DriveItemId::new("root"),
+            remote_path: "/".to_owned(),
+            display_name: "test".to_owned(),
+            status: PairStatus::Initializing,
+            paused: false,
+            delta_token: None,
+            errored_reason: None,
+            created_at: ts(0),
+            updated_at: ts(0),
+            last_sync_at: None,
+            conflict_count: 0,
+            webhook_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_post_cycle_promotes_initializing_to_active_when_cursor_returned() {
+        let state = InMemoryStore::new();
+        let clock = FixedClock(ts(123));
+        let pair = initializing_pair();
+        state.pair_upsert(&pair).await.unwrap();
+
+        let summary = CycleSummary {
+            delta_token: Some(DeltaCursor::new("c-1")),
+            ..CycleSummary::default()
+        };
+        persist_post_cycle(&state, &clock, &pair, &summary).await;
+
+        let after = state.pair_get(&pair.id).await.unwrap().expect("pair");
+        assert_eq!(after.status, PairStatus::Active);
+        assert_eq!(
+            after.delta_token.as_ref().map(DeltaCursor::as_str),
+            Some("c-1")
+        );
+        assert_eq!(after.last_sync_at, Some(ts(123)));
+    }
+
+    #[tokio::test]
+    async fn persist_post_cycle_leaves_initializing_when_no_cursor_returned() {
+        let state = InMemoryStore::new();
+        let clock = FixedClock(ts(123));
+        let pair = initializing_pair();
+        state.pair_upsert(&pair).await.unwrap();
+
+        // No cursor means the delta call did not complete or the fake omitted one;
+        // we must not declare success.
+        let summary = CycleSummary::default();
+        persist_post_cycle(&state, &clock, &pair, &summary).await;
+
+        let after = state.pair_get(&pair.id).await.unwrap().expect("pair");
+        assert_eq!(after.status, PairStatus::Initializing);
+        assert!(after.delta_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn persist_post_cycle_does_not_demote_already_active_pair() {
+        let state = InMemoryStore::new();
+        let clock = FixedClock(ts(123));
+        let mut pair = initializing_pair();
+        pair.status = PairStatus::Active;
+        pair.delta_token = Some(DeltaCursor::new("c-prev"));
+        state.pair_upsert(&pair).await.unwrap();
+
+        let summary = CycleSummary {
+            delta_token: Some(DeltaCursor::new("c-next")),
+            ..CycleSummary::default()
+        };
+        persist_post_cycle(&state, &clock, &pair, &summary).await;
+
+        let after = state.pair_get(&pair.id).await.unwrap().expect("pair");
+        assert_eq!(after.status, PairStatus::Active);
+        assert_eq!(
+            after.delta_token.as_ref().map(DeltaCursor::as_str),
+            Some("c-next")
+        );
     }
 }

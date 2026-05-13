@@ -106,6 +106,11 @@ pub struct CycleSummary {
     pub ops_applied: usize,
     /// Number of conflicts detected this cycle.
     pub conflicts_detected: usize,
+    /// New delta cursor returned by the terminal `/delta` page. `None` if the upstream
+    /// adapter did not return a cursor (e.g. mid-stream paging error, fakes that don't
+    /// emit one). The scheduler persists this on the `Pair` and uses its presence to
+    /// gate the `Initializing -> Active` transition.
+    pub delta_token: Option<onesync_protocol::primitives::DeltaCursor>,
 }
 
 /// Metadata about one file's mtime used by the conflict-detection heuristic.

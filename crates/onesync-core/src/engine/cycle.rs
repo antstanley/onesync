@@ -77,7 +77,7 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
         .emit(cycle_started(ctx.ids.new_id(), now, ctx.pair_id));
 
     // Phase 1 + 3a: delta → reconcile → decisions.
-    let (mut decisions, conflicts_detected, remote_items_seen) =
+    let (mut decisions, conflicts_detected, remote_items_seen, delta_token) =
         phase_delta_reconcile(ctx).await?;
 
     // Phase 2 + 3b: local scan → upload decisions for untracked / diverged paths.
@@ -120,6 +120,7 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
         local_events_seen,
         ops_applied,
         conflicts_detected,
+        delta_token,
     };
 
     ctx.audit.emit(cycle_finished(
@@ -133,10 +134,19 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     Ok(summary)
 }
 
-/// Phase 1–3: fetch delta, reconcile each item, return (decisions, conflicts, `items_seen`).
+/// Phase 1–3: fetch delta, reconcile each item, return
+/// `(decisions, conflicts, items_seen, delta_token)`.
 async fn phase_delta_reconcile<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
-) -> Result<(Vec<crate::engine::types::Decision>, usize, usize), EngineError> {
+) -> Result<
+    (
+        Vec<crate::engine::types::Decision>,
+        usize,
+        usize,
+        Option<DeltaCursor>,
+    ),
+    EngineError,
+> {
     let delta_page = ctx
         .remote
         .delta(&ctx.drive_id, ctx.cursor.as_ref())
@@ -144,6 +154,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
         .map_err(|e| EngineError::Port(e.to_string()))?;
 
     let remote_items_seen = delta_page.items.len();
+    let delta_token = delta_page.delta_token.clone();
     let mut decisions = Vec::new();
     let mut conflicts_detected = 0usize;
 
@@ -173,7 +184,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
         decisions.push(decision);
     }
 
-    Ok((decisions, conflicts_detected, remote_items_seen))
+    Ok((decisions, conflicts_detected, remote_items_seen, delta_token))
 }
 
 /// Phase 2 + 3b: scan the local root, detect untracked or diverged files, and emit
