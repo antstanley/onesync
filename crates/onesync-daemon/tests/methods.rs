@@ -33,6 +33,9 @@ fn make_ctx() -> DispatchCtx {
         clock: Arc::new(onesync_time::SystemClock),
         ids: Arc::new(onesync_time::UlidGenerator::default()),
         audit: Arc::new(NullAuditSink),
+        vault: Arc::new(onesync_keychain::fakes::InMemoryTokenVault::default()),
+        http: reqwest::Client::new(),
+        login_registry: Arc::new(onesync_daemon::login_registry::LoginRegistry::new()),
     }
 }
 
@@ -153,13 +156,22 @@ async fn account_list_returns_empty_array_on_fresh_store() {
 }
 
 #[tokio::test]
-async fn account_login_begin_still_returns_not_implemented() {
-    // Deferred until Graph adapter is wired; documented stub.
+async fn account_login_begin_refuses_when_azure_ad_client_id_unset() {
+    // M9 Task 2: login.begin reads azure_ad_client_id from InstanceConfig. With no config row
+    // it must refuse with an APP_ERROR rather than touching the OAuth provider.
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(
-        &roundtrip(&sock, "account.login.begin").await,
-        "account.login.begin",
-    );
+    let resp = roundtrip(&sock, "account.login.begin").await;
+    match resp {
+        JsonRpcResponse::Err(e) => {
+            assert_eq!(e.error.code, APP_ERROR_BASE - 10);
+            assert!(
+                e.error.message.contains("azure_ad_client_id"),
+                "unexpected error message: {}",
+                e.error.message
+            );
+        }
+        JsonRpcResponse::Ok(_) => unreachable!("expected error, got Ok"),
+    }
     token.trigger();
 }
 

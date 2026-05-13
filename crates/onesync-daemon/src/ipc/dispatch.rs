@@ -88,9 +88,12 @@ mod tests {
     use std::time::Instant;
 
     use onesync_fs_local::fakes::InMemoryLocalFs;
+    use onesync_keychain::fakes::InMemoryTokenVault;
     use onesync_protocol::rpc::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND};
     use onesync_state::fakes::InMemoryStore;
     use onesync_time::{SystemClock, UlidGenerator};
+
+    use crate::login_registry::LoginRegistry;
 
     use super::*;
 
@@ -109,6 +112,9 @@ mod tests {
             clock: Arc::new(SystemClock),
             ids: Arc::new(UlidGenerator::default()),
             audit: Arc::new(NullAuditSink),
+            vault: Arc::new(InMemoryTokenVault::default()),
+            http: reqwest::Client::new(),
+            login_registry: Arc::new(LoginRegistry::new()),
         }
     }
 

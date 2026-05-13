@@ -10,6 +10,7 @@ pub mod audit_sink;
 pub mod ipc;
 pub mod lock;
 pub mod logging;
+pub mod login_registry;
 pub mod methods;
 pub mod shutdown;
 pub mod startup;

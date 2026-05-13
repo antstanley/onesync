@@ -34,6 +34,9 @@ fn make_ctx() -> DispatchCtx {
         clock: Arc::new(onesync_time::SystemClock),
         ids: Arc::new(onesync_time::UlidGenerator::default()),
         audit: Arc::new(NullAuditSink),
+        vault: Arc::new(onesync_keychain::fakes::InMemoryTokenVault::default()),
+        http: reqwest::Client::new(),
+        login_registry: Arc::new(onesync_daemon::login_registry::LoginRegistry::new()),
     }
 }
 

@@ -1405,6 +1405,7 @@ dependencies = [
  "onesync-protocol",
  "onesync-state",
  "onesync-time",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -1412,6 +1413,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

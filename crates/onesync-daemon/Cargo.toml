@@ -26,6 +26,7 @@ onesync-state    = { path = "../onesync-state" }
 onesync-fs-local = { path = "../onesync-fs-local" }
 onesync-graph    = { path = "../onesync-graph" }
 onesync-keychain = { path = "../onesync-keychain" }
+reqwest          = { workspace = true }
 onesync-time     = { path = "../onesync-time" }
 anyhow           = { workspace = true }
 async-trait      = { workspace = true }
@@ -42,5 +43,7 @@ tracing-subscriber = { workspace = true }
 tempfile         = { workspace = true }
 onesync-state    = { path = "../onesync-state", features = ["fakes"] }
 onesync-fs-local = { path = "../onesync-fs-local", features = ["fakes"] }
+onesync-keychain = { path = "../onesync-keychain", features = ["fakes"] }
 onesync-time     = { path = "../onesync-time" }
 chrono           = { workspace = true }
+wiremock         = { workspace = true }

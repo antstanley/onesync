@@ -96,6 +96,9 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         clock: ports.clock.clone(),
         ids: ports.ids.clone(),
         audit: ports.audit.clone(),
+        vault: ports.vault.clone(),
+        http: ports.http.clone(),
+        login_registry: ports.login_registry.clone(),
     };
 
     // Start shutdown signal handler.

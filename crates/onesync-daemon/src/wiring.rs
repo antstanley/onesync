@@ -8,11 +8,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore};
+use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
 use onesync_fs_local::LocalFsAdapter;
+use onesync_keychain::KeychainTokenVault;
 use onesync_protocol::audit::AuditEvent;
 use onesync_state::SqliteStore;
 use onesync_time::{SystemClock, UlidGenerator};
+
+use crate::login_registry::LoginRegistry;
 
 /// Live port adapters held for the daemon's entire lifetime.
 // LINT: fields are consumed by IPC server tasks added in Tasks 11-14.
@@ -33,6 +36,12 @@ pub struct DaemonPorts {
     pub ids: Arc<UlidGenerator>,
     /// No-op audit sink (replaced by the real `DaemonAuditSink` in Task 14).
     pub audit: Arc<dyn AuditSink>,
+    /// macOS Keychain-backed OAuth refresh-token vault.
+    pub vault: Arc<dyn TokenVault>,
+    /// HTTP client shared across method handlers (rustls; built once).
+    pub http: reqwest::Client,
+    /// In-flight OAuth login sessions, indexed by login-handle string.
+    pub login_registry: Arc<LoginRegistry>,
 }
 
 /// Discards all audit events. Stands in until Task 14 wires the real sink.
@@ -66,6 +75,12 @@ pub fn build_ports(state_dir: &Path) -> anyhow::Result<DaemonPorts> {
     let local_fs: Arc<dyn LocalFs> = Arc::new(LocalFsAdapter);
     let ids = Arc::new(UlidGenerator::default());
     let audit: Arc<dyn AuditSink> = Arc::new(NoopAuditSink);
+    let vault: Arc<dyn TokenVault> = Arc::new(KeychainTokenVault);
+    let http = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .with_context(|| "failed to build HTTP client".to_owned())?;
+    let login_registry = Arc::new(LoginRegistry::new());
 
     Ok(DaemonPorts {
         state,
@@ -73,6 +88,9 @@ pub fn build_ports(state_dir: &Path) -> anyhow::Result<DaemonPorts> {
         clock,
         ids,
         audit,
+        vault,
+        http,
+        login_registry,
     })
 }
 

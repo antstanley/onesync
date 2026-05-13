@@ -13,8 +13,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore};
+use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
 use onesync_time::UlidGenerator;
+
+use crate::login_registry::LoginRegistry;
 
 pub mod account;
 pub mod audit;
@@ -46,6 +48,12 @@ pub struct DispatchCtx {
     pub ids: Arc<UlidGenerator>,
     /// Audit-event sink.
     pub audit: Arc<dyn AuditSink>,
+    /// Secure storage for OAuth refresh tokens.
+    pub vault: Arc<dyn TokenVault>,
+    /// HTTP client shared across method handlers (rustls; built once).
+    pub http: reqwest::Client,
+    /// In-flight OAuth login sessions, indexed by login-handle string.
+    pub login_registry: Arc<LoginRegistry>,
 }
 
 /// Application-level method error.
