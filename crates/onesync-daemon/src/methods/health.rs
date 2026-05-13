@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 /// Current application version string, taken from Cargo metadata at compile time.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,7 +20,7 @@ const SCHEMA_VERSION: u32 = 1;
 /// Returns `{ "uptime_s": <u64>, "version": "<semver>", "schema_version": <u32> }`.
 // LINT: Result return is the uniform handler signature; ping never errs but others do.
 #[allow(clippy::unnecessary_wraps)]
-pub async fn ping(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn ping(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let uptime_s = ctx.started_at.elapsed().as_secs();
     Ok(serde_json::json!({
         "uptime_s": uptime_s,
@@ -36,7 +36,7 @@ pub async fn ping(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodErr
 /// for now returns a minimal stub.
 // LINT: Result return is the uniform handler signature; diagnostics will err on db failures.
 #[allow(clippy::unnecessary_wraps)]
-pub async fn diagnostics(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn diagnostics(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let uptime_s = ctx.started_at.elapsed().as_secs();
     Ok(serde_json::json!({
         "version": VERSION,

@@ -18,7 +18,7 @@ use onesync_protocol::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 #[derive(Debug, Deserialize)]
 struct PairAddParams {
@@ -34,7 +34,7 @@ struct PairAddParams {
 /// `pair.add` — validate the local path, resolve the remote root, mint a `Pair` row.
 #[allow(clippy::too_many_lines)]
 // LINT: linear validation + lookup flow; splitting only adds indirection.
-pub async fn add(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn add(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: PairAddParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -184,7 +184,7 @@ pub async fn add(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError
 }
 
 /// `pair.list` — return all non-removed pairs.
-pub async fn list(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn list(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let pairs = ctx
         .state
         .pairs_list(None, false)
@@ -199,7 +199,7 @@ struct PairByIdParams {
 }
 
 /// `pair.get` — fetch one pair by id.
-pub async fn get(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn get(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: PairByIdParams = parse_pair_id(params)?;
     let pair = ctx
         .state
@@ -216,17 +216,17 @@ pub async fn get(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError
 }
 
 /// `pair.pause` — set status=Paused, paused=true.
-pub async fn pause(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn pause(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     set_paused(ctx, params, true).await
 }
 
 /// `pair.resume` — set status=Active, paused=false.
-pub async fn resume(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn resume(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     set_paused(ctx, params, false).await
 }
 
 /// `pair.remove` — soft-delete (status=Removed). State stays so audits/runs remain queryable.
-pub async fn remove(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn remove(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: PairByIdParams = parse_pair_id(params)?;
     let mut pair = require_pair(ctx, &p.id).await?;
     pair.status = PairStatus::Removed;
@@ -240,7 +240,7 @@ pub async fn remove(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodEr
 }
 
 /// `pair.force_sync` — push a manual trigger through the scheduler.
-pub async fn force_sync(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn force_sync(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: PairByIdParams = parse_pair_id(params)?;
     require_pair(ctx, &p.id).await?;
     ctx.scheduler.force_sync(p.id).await.map_err(|()| {
@@ -253,7 +253,7 @@ pub async fn force_sync(ctx: &DispatchCtx, params: &Value) -> Result<Value, Meth
 }
 
 /// `pair.status` — aggregate Pair + recent runs + unresolved-conflicts count.
-pub async fn status(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn status(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: PairByIdParams = parse_pair_id(params)?;
     let pair = require_pair(ctx, &p.id).await?;
     let recent_runs = ctx
@@ -274,7 +274,7 @@ pub async fn status(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodEr
 }
 
 /// `pair.subscribe` — wired alongside the broader subscription streaming layer in M10.
-pub async fn subscribe(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn subscribe(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("pair.subscribe"))
 }
 
@@ -290,7 +290,7 @@ fn parse_pair_id(params: &Value) -> Result<PairByIdParams, MethodError> {
 }
 
 async fn require_pair(
-    ctx: &DispatchCtx,
+    ctx: &ConnCtx,
     id: &PairId,
 ) -> Result<onesync_protocol::pair::Pair, MethodError> {
     ctx.state
@@ -305,7 +305,7 @@ async fn require_pair(
         })
 }
 
-async fn set_paused(ctx: &DispatchCtx, params: &Value, paused: bool) -> Result<Value, MethodError> {
+async fn set_paused(ctx: &ConnCtx, params: &Value, paused: bool) -> Result<Value, MethodError> {
     let p = parse_pair_id(params)?;
     let mut pair = require_pair(ctx, &p.id).await?;
     pair.paused = paused;

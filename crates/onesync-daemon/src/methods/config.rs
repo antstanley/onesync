@@ -8,10 +8,10 @@ use onesync_protocol::{config::InstanceConfig, enums::LogLevel};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 /// `config.get` — fetch the singleton instance config.
-pub async fn get(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn get(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let cfg = ctx
         .state
         .config_get()
@@ -32,7 +32,7 @@ struct ConfigSetParams {
 }
 
 /// `config.set` — update fields of the singleton instance config.
-pub async fn set(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn set(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: ConfigSetParams = if params.is_null() {
         ConfigSetParams::default()
     } else {
@@ -91,6 +91,6 @@ pub async fn set(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError
 ///
 /// Onesync keeps the canonical config in the state store, so reloading is equivalent to a fresh
 /// `config.get` from the perspective of an external caller.
-pub async fn reload(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn reload(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     get(ctx, &Value::Null).await
 }

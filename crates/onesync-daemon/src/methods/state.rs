@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 #[derive(Debug, Deserialize)]
 struct StateBackupParams {
@@ -19,7 +19,7 @@ struct StateBackupParams {
 }
 
 /// `state.backup` — write a consistent snapshot of the `SQLite` DB to `to_path`.
-pub async fn backup(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn backup(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: StateBackupParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -40,7 +40,7 @@ struct StateExportParams {
 }
 
 /// `state.export` — dump every queryable table as JSON files under `to_dir`.
-pub async fn export(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn export(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: StateExportParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -90,7 +90,7 @@ pub async fn export(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodEr
 }
 
 /// `state.repair.permissions` — chmod 0700 the state directory, 0600 every file inside.
-pub async fn repair_permissions(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn repair_permissions(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let state_dir = ctx.state_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<String>, std::io::Error> {
         let mut touched: Vec<String> = Vec::new();
@@ -121,7 +121,7 @@ pub async fn repair_permissions(ctx: &DispatchCtx, _params: &Value) -> Result<Va
 }
 
 /// `state.compact.now` — retention prune + `VACUUM`.
-pub async fn compact_now(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn compact_now(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let now = ctx.clock.now();
     ctx.state
         .compact_now(&now)

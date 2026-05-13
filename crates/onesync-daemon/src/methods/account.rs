@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::login_registry::LoginSession;
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 /// Authority used for the `common` Microsoft identity endpoint — accepts both personal MSA
 /// and work/school AAD accounts and routes per-account at sign-in.
@@ -43,7 +43,7 @@ struct LoginBeginParams {
 /// loopback listener, generates the PKCE pair + state token, stashes a [`LoginSession`]
 /// under a new `login_handle`, spawns a task to await the redirect, and returns
 /// `{ login_handle, auth_url }`.
-pub async fn login_begin(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn login_begin(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: LoginBeginParams = if params.is_null() {
         LoginBeginParams::default()
     } else {
@@ -148,7 +148,7 @@ struct LoginAwaitParams {
 /// the new Account row + keychain refresh token.
 #[allow(clippy::too_many_lines)]
 // LINT: linear OAuth flow with seven explicit phases; splitting hurts readability.
-pub async fn login_await(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn login_await(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: LoginAwaitParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -290,7 +290,7 @@ pub async fn login_await(ctx: &DispatchCtx, params: &Value) -> Result<Value, Met
 }
 
 /// `account.list` — return all linked accounts.
-pub async fn list(ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn list(ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     let accts = ctx
         .state
         .accounts_list()
@@ -305,7 +305,7 @@ struct AccountByIdParams {
 }
 
 /// `account.get` — fetch one account by id.
-pub async fn get(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn get(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: AccountByIdParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -352,7 +352,7 @@ struct AddSharePointParams {
 /// `SharePoint` library exactly the way `/me/drive` pairs target personal storage.
 #[allow(clippy::too_many_lines)]
 // LINT: linear resolve → mint → audit; splitting hurts readability.
-pub async fn add_sharepoint(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn add_sharepoint(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: AddSharePointParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -482,7 +482,7 @@ pub async fn add_sharepoint(ctx: &DispatchCtx, params: &Value) -> Result<Value, 
 }
 
 /// `account.remove` — unlink an account, delete the keychain entry, cascade-remove pairs.
-pub async fn remove(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn remove(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: AccountByIdParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,

@@ -10,7 +10,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 #[derive(Debug, Default, Deserialize)]
 struct ServiceShutdownParams {
@@ -22,7 +22,7 @@ struct ServiceShutdownParams {
 }
 
 /// `service.shutdown` — trigger the daemon's `ShutdownToken`.
-pub async fn shutdown(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn shutdown(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let _p: ServiceShutdownParams = if params.is_null() {
         ServiceShutdownParams::default()
     } else {
@@ -33,18 +33,18 @@ pub async fn shutdown(ctx: &DispatchCtx, params: &Value) -> Result<Value, Method
 }
 
 /// `service.upgrade.prepare`
-pub async fn upgrade_prepare(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn upgrade_prepare(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("service.upgrade.prepare"))
 }
 
 /// `service.upgrade.commit`
-pub async fn upgrade_commit(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn upgrade_commit(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("service.upgrade.commit"))
 }
 
 /// `subscription.cancel`
 pub async fn subscription_cancel(
-    _ctx: &DispatchCtx,
+    _ctx: &ConnCtx,
     _params: &Value,
 ) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("subscription.cancel"))

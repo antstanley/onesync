@@ -9,10 +9,15 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use anyhow::Context as _;
+use onesync_protocol::rpc::JsonRpcNotification;
 use tokio::net::UnixListener;
+use tokio::sync::mpsc;
 
-use crate::methods::DispatchCtx;
+use crate::methods::{ConnCtx, DispatchCtx};
 use crate::shutdown::ShutdownToken;
+
+/// Bound depth of the per-connection notification channel feeding the outbound writer.
+const CONN_NOTIF_DEPTH: usize = 512;
 
 /// The filename of the IPC socket.
 pub const SOCKET_FILE: &str = "onesync.sock";
@@ -75,27 +80,42 @@ pub async fn run(runtime_dir: &Path, token: ShutdownToken, ctx: DispatchCtx) -> 
 /// Handle a single IPC connection.
 ///
 /// Reads JSON-RPC frames, dispatches each through [`crate::ipc::dispatch`],
-/// and writes the serialised response back.
+/// and writes the serialised response back. Concurrently, a writer task drains the
+/// per-connection notification channel so subscription-emitting methods (`audit.tail`,
+/// `pair.subscribe`, `conflict.subscribe`) can push `JsonRpcNotification` frames to the
+/// same socket without competing with the request/response stream for the write half.
 async fn handle_connection(stream: tokio::net::UnixStream, ctx: DispatchCtx) {
     use tokio::io::BufReader;
 
-    use crate::ipc::framing::{FrameError, read_frame, write_frame};
+    use crate::ipc::framing::{FrameError, read_frame};
 
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
+
+    // Per-connection notification fan-in. Subscriptions on this connection clone the
+    // sender (via ConnCtx.notif_tx) and push frames here.
+    let (notif_tx, notif_rx) = mpsc::channel::<JsonRpcNotification>(CONN_NOTIF_DEPTH);
+
+    // (response_tx, response_rx) carry serialised JSON-RPC responses from the dispatch
+    // path to the writer task. Multiplexing responses + notifications onto one writer
+    // half prevents interleaved partial frames.
+    let (response_tx, response_rx) = mpsc::channel::<String>(CONN_NOTIF_DEPTH);
+
+    let writer_handle = tokio::spawn(writer_task(write_half, notif_rx, response_rx));
+
+    let conn = ConnCtx::new(ctx, notif_tx);
 
     loop {
         match read_frame(&mut reader).await {
             Ok(line) => {
                 tracing::debug!(frame = %line, "ipc frame received");
-                let response = parse_and_dispatch(&line, &ctx).await;
-                let serialised = serde_json::to_string(&response)
-                    .unwrap_or_else(|_| {
-                        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal serialisation error"}}"#
-                            .to_owned()
-                    });
-                if let Err(e) = write_frame(&mut write_half, &serialised).await {
-                    tracing::debug!(error = %e, "ipc write error");
+                let response = parse_and_dispatch(&line, &conn).await;
+                let serialised = serde_json::to_string(&response).unwrap_or_else(|_| {
+                    r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal serialisation error"}}"#
+                        .to_owned()
+                });
+                if response_tx.send(serialised).await.is_err() {
+                    tracing::debug!("ipc writer task gone; closing connection");
                     break;
                 }
             }
@@ -110,6 +130,51 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: DispatchCtx) {
             }
         }
     }
+
+    drop(response_tx);
+    drop(conn);
+    let _ = writer_handle.await;
+}
+
+/// Multiplex outbound JSON-RPC responses and subscription notifications onto the
+/// connection's write half. Runs until both channels close.
+async fn writer_task(
+    mut write_half: tokio::net::unix::OwnedWriteHalf,
+    mut notif_rx: mpsc::Receiver<JsonRpcNotification>,
+    mut response_rx: mpsc::Receiver<String>,
+) {
+    use crate::ipc::framing::write_frame;
+
+    loop {
+        tokio::select! {
+            // tokio::select! randomises so notifications still drain even though both
+            // request/response and subscription pumps share the write half.
+            maybe_resp = response_rx.recv() => {
+                if let Some(resp) = maybe_resp {
+                    if let Err(e) = write_frame(&mut write_half, &resp).await {
+                        tracing::debug!(error = %e, "ipc write error (response)");
+                        return;
+                    }
+                } else {
+                    // Request side closed; drain pending notifications then exit.
+                    while let Some(notif) = notif_rx.recv().await {
+                        let Ok(json) = serde_json::to_string(&notif) else { continue };
+                        if write_frame(&mut write_half, &json).await.is_err() {
+                            return;
+                        }
+                    }
+                    return;
+                }
+            }
+            maybe_notif = notif_rx.recv() => if let Some(notif) = maybe_notif {
+                let Ok(json) = serde_json::to_string(&notif) else { continue };
+                if let Err(e) = write_frame(&mut write_half, &json).await {
+                    tracing::debug!(error = %e, "ipc write error (notification)");
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Parse a raw JSON line as a `JsonRpcRequest` and dispatch it.
@@ -117,7 +182,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: DispatchCtx) {
 /// Returns a parse-error response if the JSON is invalid.
 async fn parse_and_dispatch(
     line: &str,
-    ctx: &DispatchCtx,
+    ctx: &ConnCtx,
 ) -> onesync_protocol::rpc::JsonRpcResponse {
     use onesync_protocol::rpc::{self, JsonRpcResponse};
 

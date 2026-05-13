@@ -6,12 +6,12 @@
 
 use onesync_protocol::rpc::{self, JsonRpcRequest, JsonRpcResponse};
 
-use crate::methods::{self, DispatchCtx};
+use crate::methods::{self, ConnCtx};
 
 /// Dispatch one JSON-RPC request to the appropriate handler.
 ///
 /// Returns a [`JsonRpcResponse`] suitable for serialising back to the client.
-pub async fn dispatch(req: &JsonRpcRequest, ctx: &DispatchCtx) -> JsonRpcResponse {
+pub async fn dispatch(req: &JsonRpcRequest, ctx: &ConnCtx) -> JsonRpcResponse {
     let id = id_str(req.id.as_ref());
 
     let result = match req.method.as_str() {
@@ -95,6 +95,7 @@ mod tests {
     use onesync_time::{SystemClock, UlidGenerator};
 
     use crate::login_registry::LoginRegistry;
+    use crate::methods::DispatchCtx;
 
     use super::*;
 
@@ -105,8 +106,8 @@ mod tests {
         fn emit(&self, _event: onesync_protocol::audit::AuditEvent) {}
     }
 
-    fn ctx() -> DispatchCtx {
-        DispatchCtx {
+    fn ctx() -> ConnCtx {
+        ConnCtx::detached(DispatchCtx {
             started_at: Instant::now(),
             state: Arc::new(InMemoryStore::new()),
             local_fs: Arc::new(InMemoryLocalFs::new()),
@@ -120,7 +121,7 @@ mod tests {
             state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
             scheduler: crate::scheduler::SchedulerHandle::for_tests(),
             subscriptions: crate::ipc::subscriptions::SubscriptionRegistry::new(),
-        }
+        })
     }
 
     #[tokio::test]

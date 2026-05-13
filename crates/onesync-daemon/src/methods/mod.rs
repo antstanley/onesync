@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
+use onesync_protocol::rpc::JsonRpcNotification;
 use onesync_time::UlidGenerator;
+use tokio::sync::mpsc;
 
 use crate::ipc::subscriptions::SubscriptionRegistry;
 use crate::login_registry::LoginRegistry;
@@ -65,6 +67,51 @@ pub struct DispatchCtx {
     pub scheduler: SchedulerHandle,
     /// Process-global subscription registry; `audit.tail` registers here.
     pub subscriptions: SubscriptionRegistry,
+}
+
+/// Per-connection dispatch wrapper.
+///
+/// Carries the shared [`DispatchCtx`] plus an mpsc sender that pumps
+/// `JsonRpcNotification` frames to the connection's outbound writer task. Methods that
+/// register subscriptions (`audit.tail`, future `pair.subscribe` / `conflict.subscribe`)
+/// hand notifications to this channel; non-streaming methods can ignore it.
+///
+/// Implements [`Deref`](std::ops::Deref) so existing handlers that read fields like
+/// `ctx.state` keep compiling without modification.
+#[derive(Clone)]
+pub struct ConnCtx {
+    /// Shared, process-wide context.
+    pub base: DispatchCtx,
+    /// Outbound notification sender for this connection.
+    pub notif_tx: mpsc::Sender<JsonRpcNotification>,
+}
+
+impl ConnCtx {
+    /// Construct a new `ConnCtx`.
+    #[must_use]
+    pub const fn new(base: DispatchCtx, notif_tx: mpsc::Sender<JsonRpcNotification>) -> Self {
+        Self { base, notif_tx }
+    }
+
+    /// Construct a `ConnCtx` whose notification channel is immediately closed. Useful for
+    /// unit tests and one-shot dispatch sites that never push notifications: any handler
+    /// that does try to send will see a closed-channel error rather than blocking.
+    #[must_use]
+    pub fn detached(base: DispatchCtx) -> Self {
+        let (tx, _rx) = mpsc::channel(1);
+        // Drop the receiver so the sender is immediately closed for any subsequent send.
+        Self {
+            base,
+            notif_tx: tx,
+        }
+    }
+}
+
+impl std::ops::Deref for ConnCtx {
+    type Target = DispatchCtx;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 
 /// Application-level method error.

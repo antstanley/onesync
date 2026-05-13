@@ -12,7 +12,7 @@ use onesync_protocol::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 #[derive(Debug, Deserialize)]
 struct ConflictListParams {
@@ -20,7 +20,7 @@ struct ConflictListParams {
 }
 
 /// `conflict.list` — unresolved conflicts for a given pair.
-pub async fn list(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn list(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: ConflictListParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -41,7 +41,7 @@ struct ConflictByIdParams {
 }
 
 /// `conflict.get` — fetch one conflict by id.
-pub async fn get(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn get(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: ConflictByIdParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -71,7 +71,7 @@ struct ConflictResolveParams {
 }
 
 /// `conflict.resolve` — record a resolution for an open conflict.
-pub async fn resolve(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn resolve(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: ConflictResolveParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -87,6 +87,6 @@ pub async fn resolve(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodE
 }
 
 /// `conflict.subscribe` — wired alongside the broader subscription layer.
-pub async fn subscribe(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
+pub async fn subscribe(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("conflict.subscribe"))
 }

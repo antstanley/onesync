@@ -7,7 +7,7 @@ use onesync_protocol::id::{PairId, SyncRunId};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{DispatchCtx, MethodError};
+use super::{ConnCtx, MethodError};
 
 /// Maximum runs returned by one `run.list` call. Most consumers want a recent slice; deeper
 /// inspection is via `audit.search`.
@@ -21,7 +21,7 @@ struct RunListParams {
 }
 
 /// `run.list` — most-recent runs for a pair (newest first).
-pub async fn list(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn list(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: RunListParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
@@ -43,7 +43,7 @@ struct RunByIdParams {
 }
 
 /// `run.get` — fetch one run by id.
-pub async fn get(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+pub async fn get(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
     let p: RunByIdParams = serde_json::from_value(params.clone()).map_err(|e| {
         MethodError::new(
             onesync_protocol::rpc::INVALID_PARAMS,
