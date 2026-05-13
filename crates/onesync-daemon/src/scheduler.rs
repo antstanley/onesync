@@ -263,10 +263,56 @@ async fn run_one_pair_inner(
 
     // 2. Get client_id from config.
     let cfg = inputs.state.config_get().await?;
-    let client_id = cfg.map(|c| c.azure_ad_client_id).unwrap_or_default();
+    let cfg_ref = cfg.as_ref();
+    let client_id = cfg_ref
+        .map(|c| c.azure_ad_client_id.clone())
+        .unwrap_or_default();
     if client_id.is_empty() {
         anyhow::bail!("azure_ad_client_id is unset; refusing to schedule pair {pair_id}");
     }
+
+    // 2a. Metered-network gate. SCNetworkReachability detection is deferred; today the
+    // helper is a stub that returns `false`, so the gate is effectively a no-op until a
+    // real detector lands. The skip-cycle branch is exercised here so the wiring is
+    // correct when it does.
+    if let Some(c) = cfg_ref
+        && !c.allow_metered
+        && is_metered_network()
+    {
+        tracing::info!(pair = %pair_id, "scheduler: skipping cycle (metered network, allow_metered=false)");
+        return Ok(());
+    }
+
+    // 2b. Free-space gate. If the local volume drops below `min_free_gib`, mark the pair
+    // Errored with reason and skip the cycle. min_free_gib == 0 disables the check.
+    if let Some(c) = cfg_ref
+        && c.min_free_gib > 0
+    {
+        match free_space_gib(&pair.local_path) {
+            Ok(have) if have < u64::from(c.min_free_gib) => {
+                tracing::warn!(
+                    pair = %pair_id,
+                    have_gib = have,
+                    min_gib = c.min_free_gib,
+                    "scheduler: free disk below threshold; pausing pair"
+                );
+                mark_pair_errored(
+                    inputs.state.as_ref(),
+                    inputs.clock.as_ref(),
+                    &pair,
+                    "free disk below threshold",
+                )
+                .await;
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(pair = %pair_id, error = %e, "scheduler: free-space probe failed; continuing");
+            }
+        }
+    }
+
+    let notify_enabled = cfg_ref.is_some_and(|c| c.notify);
 
     // 3. Build a token source backed by the vault + refresh endpoint.
     let token_source = VaultBackedTokenSource::from_inputs(inputs, account.id, client_id);
@@ -302,7 +348,16 @@ async fn run_one_pair_inner(
 
     // Persist the new delta cursor + lifecycle transitions. The cycle itself does not
     // touch the Pair row; the scheduler is the single writer of post-cycle state.
+    let promoted_to_active =
+        pair.status == PairStatus::Initializing && summary.delta_token.is_some();
     persist_post_cycle(inputs.state.as_ref(), inputs.clock.as_ref(), &pair, &summary).await;
+
+    if promoted_to_active && notify_enabled {
+        notify_user(
+            "onesync",
+            &format!("Initial sync complete for {}", pair.display_name),
+        );
+    }
 
     // Emit a per-pair audit event for each symlink skipped during this cycle's scan.
     // Per the 01-domain-model decision: scanner skips with a warning audit event.
@@ -553,6 +608,66 @@ impl TokenSource for VaultBackedTokenSource {
     }
 }
 
+/// Spawn `osascript` to display a native macOS user notification. Best-effort: failures
+/// are logged but do not interrupt the sync cycle. Notifications honour
+/// `InstanceConfig.notify`; callers gate the call on that flag.
+fn notify_user(title: &str, message: &str) {
+    let title = title.to_owned();
+    let message = message.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            shell_escape(&message),
+            shell_escape(&title)
+        );
+        if let Err(e) = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+        {
+            tracing::debug!(error = %e, "scheduler: osascript notify failed");
+        }
+    });
+}
+
+/// `AppleScript` string literals are double-quoted; backslash and double quote need escaping.
+fn shell_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Best-effort metered-network detector. Today this returns `false` unconditionally —
+/// the `SCNetworkReachability` + flags inspection is a documented carry-over for the
+/// next milestone. Wiring is in place so the gate flips on as soon as the detector lands.
+const fn is_metered_network() -> bool {
+    false
+}
+
+/// Available free-space (GiB) on the volume containing `path`, via `fs2::available_space`.
+fn free_space_gib(path: &onesync_protocol::path::AbsPath) -> Result<u64, std::io::Error> {
+    const BYTES_PER_GIB: u64 = 1 << 30;
+    fs2::available_space(std::path::Path::new(path.as_str())).map(|bytes| bytes / BYTES_PER_GIB)
+}
+
+/// Helper used by the free-space / metered gates to record a pair as Errored before
+/// returning from `run_one_pair_inner`. Audit + notification are caller-driven.
+async fn mark_pair_errored(
+    state: &dyn StateStore,
+    clock: &dyn Clock,
+    pair: &onesync_protocol::pair::Pair,
+    reason: &str,
+) {
+    let now = clock.now();
+    let updated = onesync_protocol::pair::Pair {
+        status: PairStatus::Errored,
+        errored_reason: Some(reason.to_owned()),
+        updated_at: now,
+        ..pair.clone()
+    };
+    if let Err(e) = state.pair_upsert(&updated).await {
+        tracing::warn!(pair = %pair.id, error = %e, "scheduler: pair_upsert during gate failed");
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -686,6 +801,45 @@ mod tests {
             conflict_count: 0,
             webhook_enabled: false,
         }
+    }
+
+    #[tokio::test]
+    async fn mark_pair_errored_sets_status_and_reason() {
+        let state: Arc<dyn StateStore> = Arc::new(InMemoryStore::new());
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock(ts(555)));
+        let acct_id = account_id();
+        state.account_upsert(&account(acct_id)).await.unwrap();
+        let pair = pair_on_account(acct_id, "/tmp/free-low");
+        state.pair_upsert(&pair).await.unwrap();
+
+        mark_pair_errored(
+            state.as_ref(),
+            clock.as_ref(),
+            &pair,
+            "free disk below threshold",
+        )
+        .await;
+
+        let after = state.pair_get(&pair.id).await.unwrap().expect("pair");
+        assert_eq!(after.status, PairStatus::Errored);
+        assert_eq!(
+            after.errored_reason.as_deref(),
+            Some("free disk below threshold")
+        );
+    }
+
+    #[test]
+    fn shell_escape_protects_quotes_and_backslashes() {
+        assert_eq!(
+            shell_escape(r#"hello "world" \ backslash"#),
+            r#"hello \"world\" \\ backslash"#
+        );
+    }
+
+    #[test]
+    fn is_metered_network_returns_false_today() {
+        // Documented stub: stays false until the SCNetworkReachability detector lands.
+        assert!(!is_metered_network());
     }
 
     #[tokio::test]
