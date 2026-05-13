@@ -334,6 +334,34 @@ impl StateStore for SqliteStore {
         .map_err(|e| StateError::Io(format!("join: {e}")))?
     }
 
+    async fn backup_to(&self, to: &std::path::Path) -> Result<(), StateError> {
+        let pool = self.pool.clone();
+        let to = to.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            // SQLite's VACUUM INTO writes a fresh copy with the WAL fully captured.
+            conn.execute(&format!("VACUUM INTO '{}'", to.display()), [])
+                .map_err(|e| StateError::Io(format!("VACUUM INTO failed: {e}")))?;
+            Ok::<_, StateError>(())
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
+    async fn compact_now(&self, now: &Timestamp) -> Result<(), StateError> {
+        let pool = self.pool.clone();
+        let now = *now;
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            crate::retention::run(&conn, &now).map_err(map_err)?;
+            conn.execute("VACUUM", [])
+                .map_err(|e| StateError::Io(format!("VACUUM failed: {e}")))?;
+            Ok::<_, StateError>(())
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
     async fn audit_search(
         &self,
         from_ts: &Timestamp,

@@ -17,6 +17,7 @@ use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
 use onesync_time::UlidGenerator;
 
 use crate::login_registry::LoginRegistry;
+use crate::shutdown::ShutdownToken;
 
 pub mod account;
 pub mod audit;
@@ -54,6 +55,10 @@ pub struct DispatchCtx {
     pub http: reqwest::Client,
     /// In-flight OAuth login sessions, indexed by login-handle string.
     pub login_registry: Arc<LoginRegistry>,
+    /// Shutdown token; `service.shutdown` triggers it.
+    pub shutdown_token: ShutdownToken,
+    /// Daemon state directory; used by `state.backup` / `state.repair.permissions`.
+    pub state_dir: std::path::PathBuf,
 }
 
 /// Application-level method error.

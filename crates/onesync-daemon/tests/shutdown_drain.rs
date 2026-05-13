@@ -34,6 +34,8 @@ fn make_ctx() -> DispatchCtx {
         vault: Arc::new(onesync_keychain::fakes::InMemoryTokenVault::default()),
         http: reqwest::Client::new(),
         login_registry: Arc::new(onesync_daemon::login_registry::LoginRegistry::new()),
+        shutdown_token: onesync_daemon::shutdown::ShutdownToken::new(),
+        state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
     }
 }
 

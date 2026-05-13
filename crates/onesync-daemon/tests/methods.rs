@@ -36,6 +36,8 @@ fn make_ctx() -> DispatchCtx {
         vault: Arc::new(onesync_keychain::fakes::InMemoryTokenVault::default()),
         http: reqwest::Client::new(),
         login_registry: Arc::new(onesync_daemon::login_registry::LoginRegistry::new()),
+        shutdown_token: onesync_daemon::shutdown::ShutdownToken::new(),
+        state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
     }
 }
 
@@ -258,21 +260,24 @@ async fn run_list_returns_empty_array_on_fresh_store() {
 // ── state ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn state_backup_returns_not_implemented() {
+async fn state_compact_returns_ok_on_in_memory_store() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(&roundtrip(&sock, "state.backup").await, "state.backup");
+    // InMemoryStore.compact_now is a no-op; the handler should still report success.
+    let resp = roundtrip(&sock, "state.compact.now").await;
+    assert!(matches!(resp, JsonRpcResponse::Ok(_)));
     token.trigger();
 }
 
 // ── service ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn service_shutdown_returns_not_implemented() {
+async fn service_shutdown_returns_ok() {
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(
-        &roundtrip(&sock, "service.shutdown").await,
-        "service.shutdown",
-    );
+    // The shutdown_token inside the server-side DispatchCtx is independent of `token`
+    // here (each task constructs its own), so calling service.shutdown returns Ok but
+    // does not actually stop *this* test's server. token.trigger() at the end does that.
+    let resp = roundtrip(&sock, "service.shutdown").await;
+    assert!(matches!(resp, JsonRpcResponse::Ok(_)));
     token.trigger();
 }
 

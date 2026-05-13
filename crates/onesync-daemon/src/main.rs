@@ -88,6 +88,10 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
     // Build ports.
     let ports = wiring::build_ports(&dirs.state_dir)?;
 
+    // Start shutdown signal handler.
+    let token = shutdown::ShutdownToken::new();
+    shutdown::spawn_signal_handler(token.clone());
+
     // Build the per-request dispatch context.
     let ctx = methods::DispatchCtx {
         started_at: std::time::Instant::now(),
@@ -99,11 +103,9 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         vault: ports.vault.clone(),
         http: ports.http.clone(),
         login_registry: ports.login_registry.clone(),
+        shutdown_token: token.clone(),
+        state_dir: dirs.state_dir.clone(),
     };
-
-    // Start shutdown signal handler.
-    let token = shutdown::ShutdownToken::new();
-    shutdown::spawn_signal_handler(token.clone());
 
     // Start the IPC server. Returns when the shutdown token fires.
     let runtime_dir = dirs.runtime_dir.clone();

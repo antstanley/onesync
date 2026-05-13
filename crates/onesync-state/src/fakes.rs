@@ -309,6 +309,14 @@ impl StateStore for InMemoryStore {
         Ok(out)
     }
 
+    async fn backup_to(&self, _to: &std::path::Path) -> Result<(), StateError> {
+        Ok(())
+    }
+
+    async fn compact_now(&self, _now: &Timestamp) -> Result<(), StateError> {
+        Ok(())
+    }
+
     async fn audit_search(
         &self,
         from_ts: &Timestamp,

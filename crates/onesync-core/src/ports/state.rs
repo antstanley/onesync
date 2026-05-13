@@ -127,4 +127,14 @@ pub trait StateStore: Send + Sync {
         pair: Option<&PairId>,
         limit: usize,
     ) -> Result<Vec<AuditEvent>, StateError>;
+
+    /// Write a consistent snapshot of the database to `to`. Implementations should use
+    /// `VACUUM INTO` so the WAL is fully captured.
+    async fn backup_to(&self, to: &std::path::Path) -> Result<(), StateError>;
+
+    /// Run retention pruning + `VACUUM` to reclaim space. Wired by `state.compact.now`.
+    async fn compact_now(
+        &self,
+        now: &onesync_protocol::primitives::Timestamp,
+    ) -> Result<(), StateError>;
 }

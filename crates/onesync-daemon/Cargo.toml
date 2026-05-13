@@ -29,6 +29,7 @@ onesync-keychain = { path = "../onesync-keychain" }
 reqwest          = { workspace = true }
 onesync-time     = { path = "../onesync-time" }
 anyhow           = { workspace = true }
+chrono           = { workspace = true }
 async-trait      = { workspace = true }
 clap             = { workspace = true }
 fs2              = { workspace = true }

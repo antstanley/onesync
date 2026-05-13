@@ -115,6 +115,8 @@ mod tests {
             vault: Arc::new(InMemoryTokenVault::default()),
             http: reqwest::Client::new(),
             login_registry: Arc::new(LoginRegistry::new()),
+            shutdown_token: crate::shutdown::ShutdownToken::new(),
+            state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
         }
     }
 

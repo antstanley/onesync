@@ -1,17 +1,35 @@
 //! `service.*` and `subscription.*` method handlers.
 //!
-//! - `service.shutdown` — gracefully stop the daemon
-//! - `service.upgrade.prepare` — drain connections in preparation for upgrade
-//! - `service.upgrade.commit` — commit the upgrade (exec new binary)
-//! - `subscription.cancel` — cancel a live subscription
+//! - `service.shutdown` — trigger graceful daemon stop via the dispatch-resident
+//!   `ShutdownToken`. The `drain` param is accepted for forward-compatibility but the
+//!   current shutdown path always drains.
+//! - `service.upgrade.prepare` / `service.upgrade.commit` — deferred; the upgrade flow
+//!   needs binary-swap orchestration that lives in a future milestone (M10).
+//! - `subscription.cancel` — deferred until the subscription streaming layer lands (M10).
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use super::{DispatchCtx, MethodError};
 
-/// `service.shutdown`
-pub async fn shutdown(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::not_implemented("service.shutdown"))
+#[derive(Debug, Default, Deserialize)]
+struct ServiceShutdownParams {
+    /// Reserved for future use: if `false`, exit without waiting for in-flight cycles.
+    /// Today the daemon always drains; the field is accepted for forward-compatibility.
+    #[serde(default)]
+    #[allow(dead_code)]
+    drain: Option<bool>,
+}
+
+/// `service.shutdown` — trigger the daemon's `ShutdownToken`.
+pub async fn shutdown(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+    let _p: ServiceShutdownParams = if params.is_null() {
+        ServiceShutdownParams::default()
+    } else {
+        serde_json::from_value(params.clone()).unwrap_or_default()
+    };
+    ctx.shutdown_token.trigger();
+    Ok(json!({ "ok": true }))
 }
 
 /// `service.upgrade.prepare`
