@@ -1374,6 +1374,7 @@ name = "onesync-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "bytes",
  "chrono",
  "onesync-fs-local",

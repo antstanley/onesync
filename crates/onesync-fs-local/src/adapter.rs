@@ -35,14 +35,15 @@ fn map_io(e: &std::io::Error) -> LocalFsError {
 impl LocalFs for LocalFsAdapter {
     async fn scan(&self, root: &AbsPath) -> Result<LocalScanStream, LocalFsError> {
         let root_buf = PathBuf::from(root.as_str());
-        let metas = tokio::task::spawn_blocking(move || scan::scan(&root_buf))
-            .await
-            .map_err(|e| LocalFsError::Io(format!("join: {e}")))?
-            .map_err(map_err)?;
+        let (metas, symlinks) =
+            tokio::task::spawn_blocking(move || scan::scan_with_skips(&root_buf))
+                .await
+                .map_err(|e| LocalFsError::Io(format!("join: {e}")))?
+                .map_err(map_err)?;
 
         // Convert LocalFileMeta -> (PathBuf, FileSide).
         // content_hash is left None at scan time; the engine calls `hash` lazily.
-        let out: Vec<(PathBuf, FileSide)> = metas
+        let entries: Vec<(PathBuf, FileSide)> = metas
             .into_iter()
             .map(|m| {
                 let side = FileSide {
@@ -57,7 +58,10 @@ impl LocalFs for LocalFsAdapter {
             })
             .collect();
 
-        Ok(LocalScanStream(out))
+        Ok(LocalScanStream {
+            entries,
+            symlinks_skipped: symlinks,
+        })
     }
 
     async fn read(&self, path: &AbsPath) -> Result<LocalReadStream, LocalFsError> {
@@ -171,7 +175,7 @@ mod tests {
 
         // scan — target must appear in the results
         let scan = adapter.scan(&abs(tmp.path())).await.expect("scan");
-        assert!(scan.0.iter().any(|(p, _)| p == &target));
+        assert!(scan.entries.iter().any(|(p, _)| p == &target));
 
         // hash
         let h = adapter.hash(&abs(&target)).await.expect("hash");

@@ -62,10 +62,14 @@ async fn m2_scan_state_dirty_pipeline() {
 
     // Step 5: scan + hash via adapter.
     let scan = fs.scan(&abs(&pair_root)).await.expect("scan");
-    assert_eq!(scan.0.len(), TEST_FILES, "scan should report every fixture");
+    assert_eq!(
+        scan.entries.len(),
+        TEST_FILES,
+        "scan should report every fixture"
+    );
 
     let mut observed: Vec<(PathBuf, ContentHash)> = Vec::new();
-    for (path, side) in &scan.0 {
+    for (path, side) in &scan.entries {
         if side.kind == FileKind::File {
             let h = fs.hash(&abs(path)).await.expect("hash");
             observed.push((path.clone(), h));

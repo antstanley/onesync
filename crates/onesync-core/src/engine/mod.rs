@@ -3,6 +3,7 @@
 //! The engine is pure logic — all I/O flows through port traits injected by the
 //! daemon wiring layer. Internal submodules are kept small and single-purpose.
 
+pub mod case_collision;
 pub mod conflict;
 pub mod cycle;
 pub mod executor;

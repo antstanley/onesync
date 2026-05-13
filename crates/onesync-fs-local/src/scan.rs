@@ -23,24 +23,34 @@ pub struct LocalFileMeta {
 
 const SKIP_NAMES: &[&str] = &[".DS_Store", "Icon\r", ".localized"];
 
-fn should_skip(name: &std::ffi::OsStr, meta: &std::fs::Metadata) -> bool {
-    // Symlinks: skip with a warning. (Audit hook plumbed in Task 18.)
+/// Classification returned by [`classify_skip`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Symbolic link.
+    Symlink,
+    /// macOS resource-fork sidecar (`._*`).
+    ResourceFork,
+    /// Filename in the platform deny-list (`.DS_Store`, etc.).
+    DenyListed,
+    /// Filename is not valid UTF-8.
+    NonUtf8,
+}
+
+fn classify_skip(name: &std::ffi::OsStr, meta: &std::fs::Metadata) -> Option<SkipReason> {
     if meta.file_type().is_symlink() {
-        return true;
+        return Some(SkipReason::Symlink);
     }
-    // macOS resource-fork sidecars: `._*` files.
     if let Some(s) = name.to_str() {
         if s.starts_with("._") {
-            return true;
+            return Some(SkipReason::ResourceFork);
         }
         if SKIP_NAMES.contains(&s) {
-            return true;
+            return Some(SkipReason::DenyListed);
         }
+        None
     } else {
-        // Non-UTF8 names — skip with a warning.
-        return true;
+        Some(SkipReason::NonUtf8)
     }
-    false
 }
 
 /// Walk `root` breadth-first, returning metadata for every file and directory.
@@ -50,10 +60,23 @@ fn should_skip(name: &std::ffi::OsStr, meta: &std::fs::Metadata) -> bool {
 /// "permission denied" on a single subtree (which is still surfaced — the caller decides).
 /// Returns `LocalFsAdapterError::InvalidPath` if the BFS queue exceeds `SCAN_QUEUE_DEPTH_MAX`.
 pub fn scan(root: &Path) -> Result<Vec<LocalFileMeta>, LocalFsAdapterError> {
+    let (entries, _) = scan_with_skips(root)?;
+    Ok(entries)
+}
+
+/// Variant of [`scan`] that also returns symlink-skipped paths so the scheduler can emit
+/// `local.symlink.skipped` audit events.
+///
+/// # Errors
+/// Same as [`scan`].
+pub fn scan_with_skips(
+    root: &Path,
+) -> Result<(Vec<LocalFileMeta>, Vec<PathBuf>), LocalFsAdapterError> {
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
     queue.push_back(root.to_path_buf());
 
     let mut out: Vec<LocalFileMeta> = Vec::new();
+    let mut symlinks: Vec<PathBuf> = Vec::new();
 
     while let Some(dir) = queue.pop_front() {
         let entries = std::fs::read_dir(&dir)?;
@@ -61,7 +84,10 @@ pub fn scan(root: &Path) -> Result<Vec<LocalFileMeta>, LocalFsAdapterError> {
             let entry = entry?;
             let meta = entry.metadata()?;
             let name = entry.file_name();
-            if should_skip(&name, &meta) {
+            if let Some(reason) = classify_skip(&name, &meta) {
+                if reason == SkipReason::Symlink {
+                    symlinks.push(entry.path());
+                }
                 continue;
             }
             let path = entry.path();
@@ -97,7 +123,7 @@ pub fn scan(root: &Path) -> Result<Vec<LocalFileMeta>, LocalFsAdapterError> {
         }
     }
 
-    Ok(out)
+    Ok((out, symlinks))
 }
 
 #[cfg(test)]

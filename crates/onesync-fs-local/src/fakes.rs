@@ -109,7 +109,10 @@ impl LocalFs for InMemoryLocalFs {
                 })
                 .collect()
         };
-        Ok(LocalScanStream(entries))
+        Ok(LocalScanStream {
+            entries,
+            symlinks_skipped: Vec::new(),
+        })
     }
 
     async fn read(&self, path: &AbsPath) -> Result<LocalReadStream, LocalFsError> {
@@ -263,11 +266,11 @@ mod tests {
 
         let scan = fs.scan(&abs("/root")).await.expect("scan");
         assert_eq!(
-            scan.0.len(),
+            scan.entries.len(),
             1,
             "only files under /root, excluding the root itself"
         );
-        assert!(scan.0[0].0.ends_with("a.txt"));
+        assert!(scan.entries[0].0.ends_with("a.txt"));
     }
 
     #[tokio::test]

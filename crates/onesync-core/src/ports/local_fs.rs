@@ -45,7 +45,13 @@ pub enum LocalFsError {
 }
 
 /// Stream of `(absolute_path, FileSide)` snapshots from a recursive scan.
-pub struct LocalScanStream(pub Vec<(std::path::PathBuf, FileSide)>);
+pub struct LocalScanStream {
+    /// One entry per file/directory observed by the scanner.
+    pub entries: Vec<(std::path::PathBuf, FileSide)>,
+    /// Paths that were skipped because they are symbolic links. The scheduler turns these
+    /// into `local.symlink.skipped` audit events (per the 01-domain-model decision).
+    pub symlinks_skipped: Vec<std::path::PathBuf>,
+}
 
 /// Byte buffer of a file's contents (eager; streaming `Read` comes later).
 pub struct LocalReadStream(pub Vec<u8>);
