@@ -97,6 +97,22 @@ pub enum AccountCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Register a `SharePoint` document library as an Account (M11). Re-uses the keychain
+    /// refresh token of the named base account; only the `drive_id` differs.
+    AddSharePoint {
+        /// Existing `acct_<ulid>` whose refresh token has `SharePoint` scope.
+        #[arg(long)]
+        base_account_id: String,
+        /// `SharePoint` host, e.g. `contoso.sharepoint.com`.
+        #[arg(long)]
+        host: String,
+        /// Site path under `/sites/`, e.g. `sales-team`.
+        #[arg(long)]
+        site_path: String,
+        /// Document-library display name, e.g. `Documents`.
+        #[arg(long)]
+        library_name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

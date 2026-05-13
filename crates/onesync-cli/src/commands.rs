@@ -71,6 +71,24 @@ async fn account(
             )
             .await?
         }
+        AccountCmd::AddSharePoint {
+            base_account_id,
+            host,
+            site_path,
+            library_name,
+        } => {
+            rpc(
+                socket,
+                "account.add_sharepoint",
+                json!({
+                    "base_account_id": base_account_id,
+                    "host": host,
+                    "site_path": site_path,
+                    "library_name": library_name,
+                }),
+            )
+            .await?
+        }
     };
     emit_value(cfg, &v)
 }

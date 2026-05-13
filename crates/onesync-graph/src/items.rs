@@ -64,6 +64,80 @@ pub async fn default_drive(
     json_get(http, token, &url).await
 }
 
+/// Resolve a `SharePoint` site by hostname + relative path
+/// (`<host>:/sites/<path>`). Returns the Microsoft site id.
+///
+/// `host` is e.g. `contoso.sharepoint.com`; `site_path` is the URL path under it, e.g.
+/// `sales-team`. Per the M11 `SharePoint` decision in `docs/spec/04-onedrive-adapter.md`.
+///
+/// # Errors
+/// Returns [`GraphInternalError`] on HTTP or decode failure.
+pub async fn site_by_path(
+    http: &reqwest::Client,
+    token: &str,
+    host: &str,
+    site_path: &str,
+) -> Result<SiteDto, GraphInternalError> {
+    let url = format!("{GRAPH_BASE}/sites/{host}:/sites/{site_path}");
+    json_get(http, token, &url).await
+}
+
+/// Resolve a document library by name on a given site.
+///
+/// `library_name` matches the library's display name (e.g. `Documents` or `Reports`). Returns
+/// the first matching drive in the site's `drives` collection.
+///
+/// # Errors
+/// Returns [`GraphInternalError`] on HTTP or decode failure, or `NotFound` if no library on
+/// the site has the requested name.
+pub async fn site_library_by_name(
+    http: &reqwest::Client,
+    token: &str,
+    site_id: &str,
+    library_name: &str,
+) -> Result<DriveDto, GraphInternalError> {
+    let url = format!("{GRAPH_BASE}/sites/{site_id}/drives");
+    let listing: DriveListing = json_get(http, token, &url).await?;
+    listing
+        .value
+        .into_iter()
+        .find(|d| d.name.as_deref() == Some(library_name))
+        .ok_or_else(|| GraphInternalError::NotFound {
+            request_id: String::new(),
+        })
+        .map(|d| DriveDto {
+            id: d.id,
+            drive_type: d.drive_type,
+        })
+}
+
+/// Minimal `/sites/{host}:/sites/{path}` response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteDto {
+    /// Microsoft Graph site identifier of the form `<host>,<site-guid>,<web-guid>`.
+    pub id: String,
+    /// Human-readable site display name.
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Item of the `/sites/{id}/drives` listing.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DriveListItem {
+    id: String,
+    drive_type: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Envelope for `/sites/{id}/drives`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DriveListing {
+    value: Vec<DriveListItem>,
+}
+
 /// `GET /me/drive/root:/{path}` — resolve a drive item by path.
 ///
 /// Returns `None` on 404.

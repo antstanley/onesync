@@ -326,6 +326,161 @@ pub async fn get(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct AddSharePointParams {
+    /// Existing `acct_<ulid>` whose refresh token has `SharePoint` scope. The new Account row
+    /// re-uses this account's keychain entry; the only thing that differs is the drive id.
+    base_account_id: AccountId,
+    /// `SharePoint` host, e.g. `contoso.sharepoint.com`.
+    host: String,
+    /// Site path under `/sites/`, e.g. `sales-team`.
+    site_path: String,
+    /// Document-library display name, e.g. `Documents` or `Reports`.
+    library_name: String,
+}
+
+/// `account.add_sharepoint` — resolve a `SharePoint` document library to a `DriveId` and mint
+/// a new `Account` row pointing at it. Per the M11 decision in `04-onedrive-adapter.md`.
+///
+/// Pre-conditions:
+/// - `base_account_id` is an existing Account with a valid keychain refresh token whose
+///   scopes include `SharePoint` access (e.g. `Files.ReadWrite.All`).
+/// - The user has read access to the target site + library.
+///
+/// The new Account record shares the keychain ref of the base account (no second login
+/// required); only its `drive_id` differs. Each pair under the new account targets the
+/// `SharePoint` library exactly the way `/me/drive` pairs target personal storage.
+#[allow(clippy::too_many_lines)]
+// LINT: linear resolve → mint → audit; splitting hurts readability.
+pub async fn add_sharepoint(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+    let p: AddSharePointParams = serde_json::from_value(params.clone()).map_err(|e| {
+        MethodError::new(
+            onesync_protocol::rpc::INVALID_PARAMS,
+            format!("invalid params: {e}"),
+        )
+    })?;
+    let base = ctx
+        .state
+        .account_get(&p.base_account_id)
+        .await
+        .map_err(|e| MethodError::new(onesync_protocol::rpc::INTERNAL_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            MethodError::new(
+                onesync_protocol::rpc::APP_ERROR_BASE - 40,
+                format!("base account not found: {}", p.base_account_id),
+            )
+        })?;
+
+    // Refresh the access token using the base account's keychain entry.
+    let cfg = ctx
+        .state
+        .config_get()
+        .await
+        .map_err(|e| MethodError::new(onesync_protocol::rpc::INTERNAL_ERROR, e.to_string()))?;
+    let client_id = cfg
+        .as_ref()
+        .map(|c| c.azure_ad_client_id.clone())
+        .unwrap_or_default();
+    if client_id.is_empty() {
+        return Err(MethodError::new(
+            onesync_protocol::rpc::APP_ERROR_BASE - 10,
+            "azure_ad_client_id is unset",
+        ));
+    }
+    let RefreshToken(rt) = ctx.vault.load_refresh(&base.id).await.map_err(|e| {
+        MethodError::new(
+            onesync_protocol::rpc::APP_ERROR_BASE - 22,
+            format!("keychain load failed: {e}"),
+        )
+    })?;
+    let tokens = onesync_graph::auth::refresh::refresh(&ctx.http, "common", &client_id, &rt)
+        .await
+        .map_err(|e| {
+            MethodError::new(
+                onesync_protocol::rpc::APP_ERROR_BASE - 23,
+                format!("token refresh failed: {e}"),
+            )
+        })?;
+    let _ = ctx
+        .vault
+        .store_refresh(&base.id, &RefreshToken(tokens.refresh_token))
+        .await;
+
+    // Resolve the site, then the library.
+    let site = items::site_by_path(&ctx.http, &tokens.access_token, &p.host, &p.site_path)
+        .await
+        .map_err(|e| {
+            MethodError::new(
+                onesync_protocol::rpc::APP_ERROR_BASE - 41,
+                format!("site resolve failed: {e}"),
+            )
+        })?;
+    let drive =
+        items::site_library_by_name(&ctx.http, &tokens.access_token, &site.id, &p.library_name)
+            .await
+            .map_err(|e| {
+                MethodError::new(
+                    onesync_protocol::rpc::APP_ERROR_BASE - 42,
+                    format!(
+                        "library resolve failed for '{}' on site {}: {e}",
+                        p.library_name, site.id
+                    ),
+                )
+            })?;
+
+    // Mint a new Account row reusing the base account's keychain ref.
+    let now = ctx.clock.now();
+    let new_id: AccountId = ctx.ids.new_id::<AccountTag>();
+    let display = format!(
+        "{} / {} / {}",
+        site.display_name
+            .clone()
+            .unwrap_or_else(|| p.site_path.clone()),
+        p.library_name,
+        base.display_name
+    );
+    let account = Account {
+        id: new_id,
+        kind: onesync_protocol::enums::AccountKind::Business,
+        upn: base.upn.clone(),
+        tenant_id: base.tenant_id.clone(),
+        drive_id: DriveId::new(drive.id),
+        display_name: display,
+        keychain_ref: base.keychain_ref.clone(),
+        scopes: base.scopes.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    ctx.state
+        .account_upsert(&account)
+        .await
+        .map_err(|e| MethodError::new(onesync_protocol::rpc::INTERNAL_ERROR, e.to_string()))?;
+
+    // Audit
+    let evt = AuditEvent {
+        id: ctx.ids.new_id::<AuditTag>(),
+        ts: now,
+        level: onesync_protocol::enums::AuditLevel::Info,
+        kind: "account.added_sharepoint".to_owned(),
+        pair_id: None,
+        payload: {
+            let mut m = serde_json::Map::new();
+            m.insert(
+                "account_id".to_owned(),
+                Value::String(account.id.to_string()),
+            );
+            m.insert("host".to_owned(), Value::String(p.host));
+            m.insert("site_path".to_owned(), Value::String(p.site_path));
+            m.insert("library_name".to_owned(), Value::String(p.library_name));
+            m
+        },
+    };
+    let _ = ctx.state.audit_append(&evt).await;
+    ctx.audit.emit(evt);
+
+    Ok(serde_json::to_value(account).unwrap_or(Value::Null))
+}
+
 /// `account.remove` — unlink an account, delete the keychain entry, cascade-remove pairs.
 pub async fn remove(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
     let p: AccountByIdParams = serde_json::from_value(params.clone()).map_err(|e| {

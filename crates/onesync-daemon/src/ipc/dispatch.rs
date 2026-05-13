@@ -28,6 +28,7 @@ pub async fn dispatch(req: &JsonRpcRequest, ctx: &DispatchCtx) -> JsonRpcRespons
         "account.list" => methods::account::list(ctx, &req.params).await,
         "account.get" => methods::account::get(ctx, &req.params).await,
         "account.remove" => methods::account::remove(ctx, &req.params).await,
+        "account.add_sharepoint" => methods::account::add_sharepoint(ctx, &req.params).await,
         // pair
         "pair.add" => methods::pair::add(ctx, &req.params).await,
         "pair.list" => methods::pair::list(ctx, &req.params).await,

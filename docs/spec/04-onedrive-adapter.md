@@ -297,12 +297,13 @@ are a latency optimisation only.
   install docs include a sample `cloudflared` config; the daemon exposes the receiver on a
   local port that the tunnel maps to a stable HTTPS URL. Polling via `/delta` remains the
   always-on fallback so a flaky tunnel does not break correctness, only latency.
-- *SharePoint document libraries.* **Scheduled for M11.** The engine and Graph adapter route
-  through `/me/drive` today; SharePoint requires resolving a target via
-  `/sites/{site}/drives/{drive}` plus a selector syntax in `pair add` (e.g.
-  `--site contoso.sharepoint.com --library Documents`). The schema does not need new entities
-  because a SharePoint drive maps to a `DriveId` plus a `DriveItemId`; only the Graph adapter
-  and the `pair add` flow need to learn the resolution step.
+- *SharePoint document libraries.* **Implemented in M11 (2026-05-13).** Adapter helpers
+  `items::site_by_path` + `items::site_library_by_name` resolve the target; the daemon's
+  `account.add_sharepoint` RPC (and matching `onesync account add-sharepoint` CLI subcommand)
+  mints a new `Account` row pointing at the resolved `DriveId` while reusing the base
+  account's keychain refresh token. Pairs created against that Account flow through the
+  ordinary `pair.add` path. The schema is unchanged — a SharePoint drive is just a
+  `DriveId` + `DriveItemId`.
 
 **Open questions**
 
