@@ -220,6 +220,37 @@ pub async fn subscribe(
         })
 }
 
+/// `PATCH /subscriptions/{id}` — extend a webhook subscription's expiration.
+///
+/// `expiration_iso` is an RFC3339 timestamp at most 3 days from the call time
+/// (Graph rejects anything further out). The body shape is
+/// `{"expirationDateTime": "<iso>"}`.
+///
+/// # Errors
+/// Returns [`GraphInternalError`] on HTTP failure.
+pub async fn renew_subscription(
+    http: &reqwest::Client,
+    token: &str,
+    subscription_id: &str,
+    expiration_iso: &str,
+) -> Result<(), GraphInternalError> {
+    let url = format!("{GRAPH_BASE}/subscriptions/{subscription_id}");
+    let request_id = new_request_id();
+    let body = serde_json::json!({ "expirationDateTime": expiration_iso });
+    let resp = http
+        .patch(&url)
+        .bearer_auth(token)
+        .header("client-request-id", &request_id)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| GraphInternalError::Network {
+            detail: e.to_string(),
+        })?;
+    crate::client::check_status(resp, &request_id).await?;
+    Ok(())
+}
+
 /// `DELETE /subscriptions/{id}` — remove a registered webhook.
 ///
 /// # Errors
@@ -393,5 +424,29 @@ mod tests {
         let item: RemoteItem = get_resp.json().await.unwrap();
         assert_eq!(item.id, "existing-folder");
         assert_eq!(item.name, "ExistingFolder");
+    }
+
+    #[tokio::test]
+    async fn renew_subscription_patches_with_expiration() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/subscriptions/sub-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sub-123",
+                "expirationDateTime": "2026-05-16T12:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let http = make_client();
+        let url = format!("{}/subscriptions/sub-123", server.uri());
+        let resp = http
+            .patch(&url)
+            .bearer_auth("tok")
+            .json(&serde_json::json!({ "expirationDateTime": "2026-05-16T12:00:00Z" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "PATCH status: {}", resp.status());
     }
 }

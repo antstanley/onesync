@@ -275,6 +275,17 @@ impl RemoteDrive for GraphAdapter {
             .await
             .map_err(map_to_port)
     }
+
+    async fn renew_subscription(
+        &self,
+        subscription_id: &str,
+        expiration_iso: &str,
+    ) -> Result<(), GraphError> {
+        let token = self.token().await?;
+        crate::ops::renew_subscription(&self.http, &token, subscription_id, expiration_iso)
+            .await
+            .map_err(map_to_port)
+    }
 }
 
 // ── Rich adapter tests using wiremock ─────────────────────────────────────────

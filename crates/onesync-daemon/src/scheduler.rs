@@ -31,6 +31,20 @@ use crate::shutdown::ShutdownToken;
 /// Capacity of the force-sync mpsc channel.
 const FORCE_QUEUE_DEPTH: usize = 64;
 
+/// Graph caps `/subscriptions` expiration at 3 days. We mirror that ceiling when
+/// initially registering and on every renewal.
+const SUBSCRIPTION_TTL_DAYS: i64 = 3;
+/// Renewal check interval. Once per hour is plenty: the renewal threshold is far larger.
+const SUBSCRIPTION_RENEW_TICK_S: u64 = 60 * 60;
+/// Renew a subscription when it is within this many seconds of expiry.
+const SUBSCRIPTION_RENEW_LEAD_S: i64 = 60 * 60 * 12; // 12 hours
+
+/// One entry in the scheduler's in-process subscription registry.
+struct SubscriptionInfo {
+    sub_id: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Handle the daemon retains to inject force-sync triggers into the running scheduler task.
 #[derive(Clone)]
 pub struct SchedulerHandle {
@@ -113,8 +127,8 @@ pub fn spawn_with_webhooks(
     let mut shutdown_rx = shutdown.subscribe();
 
     tokio::spawn(async move {
-        // Registered subscription ids keyed by pair id, so we can unsubscribe on shutdown.
-        let mut subscriptions: std::collections::HashMap<PairId, String> =
+        // Registered subscriptions keyed by pair id, so we can renew + unsubscribe.
+        let mut subscriptions: std::collections::HashMap<PairId, SubscriptionInfo> =
             std::collections::HashMap::new();
 
         if let Some(url) = webhook_cfg.notification_url.as_deref() {
@@ -125,10 +139,17 @@ pub fn spawn_with_webhooks(
         // First tick fires immediately; eat it so we do not race startup with `pair.add`.
         tick.tick().await;
 
+        let mut renew_tick =
+            tokio::time::interval(Duration::from_secs(SUBSCRIPTION_RENEW_TICK_S));
+        renew_tick.tick().await; // skip the immediate first fire
+
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     run_due_pairs(&inputs).await;
+                }
+                _ = renew_tick.tick() => {
+                    renew_due_subscriptions(&inputs, &mut subscriptions).await;
                 }
                 Some(pair_id) = force_rx.recv() => {
                     tracing::info!(pair = %pair_id, "scheduler: force-sync trigger");
@@ -153,7 +174,7 @@ pub fn spawn_with_webhooks(
 async fn register_initial_subscriptions(
     inputs: &SchedulerInputs,
     notification_url: &str,
-    out: &mut std::collections::HashMap<PairId, String>,
+    out: &mut std::collections::HashMap<PairId, SubscriptionInfo>,
 ) {
     let pairs = match inputs.state.pairs_active().await {
         Ok(p) => p,
@@ -183,8 +204,15 @@ async fn register_initial_subscriptions(
             .await
         {
             Ok(sub_id) => {
-                tracing::info!(pair = %pair.id, sub = %sub_id, "scheduler: graph subscription registered");
-                out.insert(pair.id, sub_id);
+                let expires_at = subscription_expiry_from_now();
+                tracing::info!(pair = %pair.id, sub = %sub_id, expires = %expires_at, "scheduler: graph subscription registered");
+                out.insert(
+                    pair.id,
+                    SubscriptionInfo {
+                        sub_id,
+                        expires_at,
+                    },
+                );
             }
             Err(e) => {
                 tracing::warn!(pair = %pair.id, error = %e, "scheduler: graph subscribe failed");
@@ -193,11 +221,72 @@ async fn register_initial_subscriptions(
     }
 }
 
+/// Renew every tracked subscription whose expiration is within
+/// `SUBSCRIPTION_RENEW_LEAD_S`. Failed renewals are logged but do not remove the entry
+/// from the registry — the next tick retries.
+async fn renew_due_subscriptions(
+    inputs: &SchedulerInputs,
+    subscriptions: &mut std::collections::HashMap<PairId, SubscriptionInfo>,
+) {
+    if subscriptions.is_empty() {
+        return;
+    }
+    // LINT: subscription expiry is wall-clock by definition.
+    #[allow(clippy::disallowed_methods)]
+    let now = chrono::Utc::now();
+    let lead = chrono::Duration::seconds(SUBSCRIPTION_RENEW_LEAD_S);
+    let due: Vec<PairId> = subscriptions
+        .iter()
+        .filter(|(_, info)| info.expires_at - now <= lead)
+        .map(|(pair_id, _)| *pair_id)
+        .collect();
+    for pair_id in due {
+        let Some(info) = subscriptions.get(&pair_id) else {
+            continue;
+        };
+        let sub_id = info.sub_id.clone();
+        let Ok(Some(pair)) = inputs.state.pair_get(&pair_id).await else {
+            continue;
+        };
+        let Ok(Some(account)) = inputs.state.account_get(&pair.account_id).await else {
+            continue;
+        };
+        let cfg = inputs.state.config_get().await.ok().flatten();
+        let client_id = cfg.map(|c| c.azure_ad_client_id).unwrap_or_default();
+        if client_id.is_empty() {
+            continue;
+        }
+        let new_expiry = subscription_expiry_from_now();
+        let token_source = VaultBackedTokenSource::from_inputs(inputs, account.id, client_id);
+        let remote = GraphAdapter::with_client(inputs.http.clone(), token_source, account.drive_id);
+        match remote
+            .renew_subscription(&sub_id, &new_expiry.to_rfc3339())
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(pair = %pair_id, sub = %sub_id, expires = %new_expiry, "scheduler: graph subscription renewed");
+                if let Some(entry) = subscriptions.get_mut(&pair_id) {
+                    entry.expires_at = new_expiry;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(pair = %pair_id, sub = %sub_id, error = %e, "scheduler: graph subscription renewal failed");
+            }
+        }
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+// LINT: subscription expiry is wall-clock by definition.
+fn subscription_expiry_from_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::days(SUBSCRIPTION_TTL_DAYS)
+}
+
 async fn unregister_subscriptions(
     inputs: &SchedulerInputs,
-    subscriptions: &std::collections::HashMap<PairId, String>,
+    subscriptions: &std::collections::HashMap<PairId, SubscriptionInfo>,
 ) {
-    for (pair_id, sub_id) in subscriptions {
+    for (pair_id, info) in subscriptions {
         let Ok(Some(pair)) = inputs.state.pair_get(pair_id).await else {
             continue;
         };
@@ -211,8 +300,8 @@ async fn unregister_subscriptions(
         }
         let token_source = VaultBackedTokenSource::from_inputs(inputs, account.id, client_id);
         let remote = GraphAdapter::with_client(inputs.http.clone(), token_source, account.drive_id);
-        if let Err(e) = remote.unsubscribe(sub_id).await {
-            tracing::warn!(pair = %pair_id, sub = %sub_id, error = %e, "scheduler: graph unsubscribe failed");
+        if let Err(e) = remote.unsubscribe(&info.sub_id).await {
+            tracing::warn!(pair = %pair_id, sub = %info.sub_id, error = %e, "scheduler: graph unsubscribe failed");
         }
     }
 }

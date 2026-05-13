@@ -120,4 +120,13 @@ pub trait RemoteDrive: Send + Sync {
 
     /// Delete a previously-registered `/subscriptions` entry.
     async fn unsubscribe(&self, subscription_id: &str) -> Result<(), GraphError>;
+
+    /// Renew a `/subscriptions` entry by extending its expiration.
+    /// `PATCH /subscriptions/{id}` with `{"expirationDateTime": "..."}`. Graph
+    /// caps the window at 3 days from the renewal time.
+    async fn renew_subscription(
+        &self,
+        subscription_id: &str,
+        expiration_iso: &str,
+    ) -> Result<(), GraphError>;
 }

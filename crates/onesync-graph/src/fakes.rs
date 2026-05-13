@@ -351,6 +351,15 @@ impl RemoteDrive for FakeRemoteDrive {
         Ok(())
     }
 
+    async fn renew_subscription(
+        &self,
+        _subscription_id: &str,
+        _expiration_iso: &str,
+    ) -> Result<(), GraphError> {
+        // Fake: always succeeds. Tests inspect the call count via wrappers.
+        Ok(())
+    }
+
     async fn mkdir(&self, parent: &RemoteItemId, name: &str) -> Result<RemoteItem, GraphError> {
         Ok(self.mkdir_sync(parent.as_str(), name))
     }
