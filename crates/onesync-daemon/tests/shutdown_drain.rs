@@ -37,6 +37,7 @@ fn make_ctx() -> DispatchCtx {
         shutdown_token: onesync_daemon::shutdown::ShutdownToken::new(),
         state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
         scheduler: onesync_daemon::scheduler::SchedulerHandle::for_tests(),
+        subscriptions: onesync_daemon::ipc::subscriptions::SubscriptionRegistry::new(),
     }
 }
 

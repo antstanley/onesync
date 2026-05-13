@@ -11,10 +11,11 @@ use anyhow::Context as _;
 use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
 use onesync_fs_local::LocalFsAdapter;
 use onesync_keychain::KeychainTokenVault;
-use onesync_protocol::audit::AuditEvent;
 use onesync_state::SqliteStore;
 use onesync_time::{SystemClock, UlidGenerator};
 
+use crate::audit_sink::DaemonAuditSink;
+use crate::ipc::subscriptions::SubscriptionRegistry;
 use crate::login_registry::LoginRegistry;
 
 /// Live port adapters held for the daemon's entire lifetime.
@@ -42,15 +43,8 @@ pub struct DaemonPorts {
     pub http: reqwest::Client,
     /// In-flight OAuth login sessions, indexed by login-handle string.
     pub login_registry: Arc<LoginRegistry>,
-}
-
-/// Discards all audit events. Stands in until Task 14 wires the real sink.
-// LINT: constructed inside build_ports which is itself used in tests and future tasks.
-#[allow(dead_code)]
-struct NoopAuditSink;
-
-impl AuditSink for NoopAuditSink {
-    fn emit(&self, _event: AuditEvent) {}
+    /// Process-global subscription registry for `audit.tail` fan-out.
+    pub subscriptions: SubscriptionRegistry,
 }
 
 /// Construct all adapters.
@@ -74,7 +68,10 @@ pub fn build_ports(state_dir: &Path) -> anyhow::Result<DaemonPorts> {
 
     let local_fs: Arc<dyn LocalFs> = Arc::new(LocalFsAdapter);
     let ids = Arc::new(UlidGenerator::default());
-    let audit: Arc<dyn AuditSink> = Arc::new(NoopAuditSink);
+    let subscriptions = SubscriptionRegistry::new();
+    crate::ipc::subscriptions::spawn_gc(subscriptions.clone());
+    let audit: Arc<dyn AuditSink> =
+        Arc::new(DaemonAuditSink::new(state.clone(), subscriptions.clone()));
     let vault: Arc<dyn TokenVault> = Arc::new(KeychainTokenVault);
     let http = reqwest::Client::builder()
         .use_rustls_tls()
@@ -91,6 +88,7 @@ pub fn build_ports(state_dir: &Path) -> anyhow::Result<DaemonPorts> {
         vault,
         http,
         login_registry,
+        subscriptions,
     })
 }
 
@@ -101,8 +99,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn build_ports_succeeds_for_temp_dir() {
+    #[tokio::test]
+    async fn build_ports_succeeds_for_temp_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let ports = build_ports(tmp.path()).unwrap();
         // Verify the clock is functional.

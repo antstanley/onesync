@@ -337,6 +337,20 @@ impl RemoteDrive for FakeRemoteDrive {
             .map_err(crate::error::map_to_port)
     }
 
+    async fn subscribe(
+        &self,
+        _drive: &DriveId,
+        _notification_url: &str,
+        client_state: &str,
+    ) -> Result<String, GraphError> {
+        // Fake: return a deterministic id derived from the client_state so tests can assert.
+        Ok(format!("fake-sub-{client_state}"))
+    }
+
+    async fn unsubscribe(&self, _subscription_id: &str) -> Result<(), GraphError> {
+        Ok(())
+    }
+
     async fn mkdir(&self, parent: &RemoteItemId, name: &str) -> Result<RemoteItem, GraphError> {
         Ok(self.mkdir_sync(parent.as_str(), name))
     }

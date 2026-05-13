@@ -107,4 +107,17 @@ pub trait RemoteDrive: Send + Sync {
     async fn delete(&self, item: &RemoteItemId) -> Result<(), GraphError>;
     /// Create a child folder under `parent`.
     async fn mkdir(&self, parent: &RemoteItemId, name: &str) -> Result<RemoteItem, GraphError>;
+
+    /// Register a `/subscriptions` webhook for `drive`. Returns the Graph-assigned
+    /// subscription id. The daemon's webhook receiver maps incoming notifications back to
+    /// the originating pair via `client_state`.
+    async fn subscribe(
+        &self,
+        drive: &DriveId,
+        notification_url: &str,
+        client_state: &str,
+    ) -> Result<String, GraphError>;
+
+    /// Delete a previously-registered `/subscriptions` entry.
+    async fn unsubscribe(&self, subscription_id: &str) -> Result<(), GraphError>;
 }

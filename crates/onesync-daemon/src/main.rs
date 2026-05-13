@@ -142,6 +142,7 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         shutdown_token: token.clone(),
         state_dir: dirs.state_dir.clone(),
         scheduler: scheduler_handle,
+        subscriptions: ports.subscriptions.clone(),
     };
 
     // Start the IPC server. Returns when the shutdown token fires.

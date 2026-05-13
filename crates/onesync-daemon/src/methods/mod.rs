@@ -16,6 +16,7 @@ use std::time::Instant;
 use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
 use onesync_time::UlidGenerator;
 
+use crate::ipc::subscriptions::SubscriptionRegistry;
 use crate::login_registry::LoginRegistry;
 use crate::scheduler::SchedulerHandle;
 use crate::shutdown::ShutdownToken;
@@ -62,6 +63,8 @@ pub struct DispatchCtx {
     pub state_dir: std::path::PathBuf,
     /// Handle to the engine scheduler; `pair.force_sync` pushes triggers via this.
     pub scheduler: SchedulerHandle,
+    /// Process-global subscription registry; `audit.tail` registers here.
+    pub subscriptions: SubscriptionRegistry,
 }
 
 /// Application-level method error.

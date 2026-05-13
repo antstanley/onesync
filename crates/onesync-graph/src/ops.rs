@@ -163,6 +163,87 @@ pub async fn mkdir(
         })
 }
 
+/// `POST /subscriptions` — register a webhook for `drive`. Returns the Graph subscription id.
+///
+/// The Microsoft Graph contract: subscription resources expire after at most ~3 days for
+/// driveItem; the daemon's scheduler is expected to renew them. M10 lands the create/delete
+/// path; renewal lives with the subscription lifecycle work in M12+.
+///
+/// # Errors
+/// Returns [`GraphInternalError`] on HTTP or decode failure.
+pub async fn subscribe(
+    http: &reqwest::Client,
+    token: &str,
+    drive_id: &DriveId,
+    notification_url: &str,
+    client_state: &str,
+) -> Result<String, GraphInternalError> {
+    let url = format!("{GRAPH_BASE}/subscriptions");
+
+    // ChangeType "updated" covers create+modify; we receive a single notification per delta.
+    // Expiration set to 3 days (max allowed for driveItem).
+    let expiration = {
+        #[allow(clippy::disallowed_methods)]
+        // LINT: subscription expiry derived from wall-clock at call time.
+        let now = chrono::Utc::now();
+        (now + chrono::Duration::days(3)).to_rfc3339()
+    };
+    let body = serde_json::json!({
+        "changeType": "updated",
+        "notificationUrl": notification_url,
+        "resource": format!("/drives/{}/root", drive_id.as_str()),
+        "expirationDateTime": expiration,
+        "clientState": client_state,
+    });
+
+    let request_id = new_request_id();
+    let resp = http
+        .post(&url)
+        .bearer_auth(token)
+        .header("client-request-id", &request_id)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| GraphInternalError::Network {
+            detail: e.to_string(),
+        })?;
+    let resp = crate::client::check_status(resp, &request_id).await?;
+    let value: serde_json::Value = resp.json().await.map_err(|e| GraphInternalError::Decode {
+        detail: e.to_string(),
+    })?;
+    value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| GraphInternalError::Decode {
+            detail: "subscriptions response missing id".to_owned(),
+        })
+}
+
+/// `DELETE /subscriptions/{id}` — remove a registered webhook.
+///
+/// # Errors
+/// Returns [`GraphInternalError`] on HTTP failure.
+pub async fn unsubscribe(
+    http: &reqwest::Client,
+    token: &str,
+    subscription_id: &str,
+) -> Result<(), GraphInternalError> {
+    let url = format!("{GRAPH_BASE}/subscriptions/{subscription_id}");
+    let request_id = new_request_id();
+    let resp = http
+        .delete(&url)
+        .bearer_auth(token)
+        .header("client-request-id", &request_id)
+        .send()
+        .await
+        .map_err(|e| GraphInternalError::Network {
+            detail: e.to_string(),
+        })?;
+    crate::client::check_status(resp, &request_id).await?;
+    Ok(())
+}
+
 fn new_request_id() -> String {
     let mut buf = [0u8; 8];
     // LINT: getrandom failure is unrecoverable.
