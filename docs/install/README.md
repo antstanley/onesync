@@ -20,8 +20,11 @@ tenant-ownership liability. See the decision in
      This matches the `common` authority onesync uses at sign-in.
    - **Redirect URI:** select **Public client/native (mobile & desktop)** and enter
      `http://localhost/callback`.
-     (onesync binds an ephemeral loopback port at sign-in time; the registered URI only needs to
-     start with `http://localhost`.)
+     onesync binds an ephemeral loopback port at sign-in time and sends
+     `http://localhost:<port>/callback`. Microsoft Entra's loopback exception ignores
+     the port at runtime as long as the host is `localhost`/`127.0.0.1`/`[::1]` and the
+     **path** matches the registered value — so register the URI exactly as written
+     above (with `/callback`), not just `http://localhost`.
 4. After registration, copy the **Application (client) ID** from the overview page. You'll feed
    it to `onesync config set` below.
 5. Under **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated
