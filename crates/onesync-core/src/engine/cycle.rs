@@ -2,17 +2,22 @@
 //!
 //! Phases:
 //! 1. **Delta** — fetch remote changes since the last cursor.
-//! 2. **Events** — drain pending local filesystem events.
+//! 2. **Local scan** — walk the pair root for new/diverged local files.
 //! 3. **Reconcile** — pure: for each changed path produce a [`Decision`].
 //! 4. **Plan** — convert decisions into ordered [`FileOp`]s.
 //! 5. **Execute** — drive each op through the port layer.
 //! 6. **Record** — persist the `SyncRun` and emit audit events.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use onesync_protocol::{
-    enums::{FileOpStatus, RunOutcome, RunTrigger},
+    enums::{FileKind, FileOpStatus, FileSyncState, RunOutcome, RunTrigger},
+    file_entry::FileEntry,
     file_op::FileOp,
+    file_side::FileSide,
     id::{AuditEventId, SyncRunId},
-    path::RelPath,
+    path::{AbsPath, RelPath},
     primitives::DeltaCursor,
     sync_run::SyncRun,
 };
@@ -24,7 +29,7 @@ use crate::{
         planner::plan,
         reconcile::reconcile_one,
         retry::{RetryDecision, retry_decision},
-        types::{CycleSummary, DecisionKind, EngineError},
+        types::{CycleSummary, Decision, DecisionKind, EngineError},
     },
     ports::{AuditSink, Clock, IdGenerator, LocalFs, RemoteDrive, StateStore},
 };
@@ -71,8 +76,16 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     ctx.audit
         .emit(cycle_started(ctx.ids.new_id(), now, ctx.pair_id));
 
-    // Phase 1 + 2 + 3: delta → reconcile → decisions.
-    let (decisions, conflicts_detected, remote_items_seen) = phase_delta_reconcile(ctx).await?;
+    // Phase 1 + 3a: delta → reconcile → decisions.
+    let (mut decisions, conflicts_detected, remote_items_seen) =
+        phase_delta_reconcile(ctx).await?;
+
+    // Phase 2 + 3b: local scan → upload decisions for untracked / diverged paths.
+    let remote_paths: HashSet<RelPath> =
+        decisions.iter().map(|d| d.relative_path.clone()).collect();
+    let (local_decisions, local_events_seen) =
+        phase_local_uploads(ctx, &remote_paths).await?;
+    decisions.extend(local_decisions);
 
     // Phase 4: plan.
     let ops = plan(decisions, run_id, now, ctx.ids);
@@ -104,7 +117,7 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
 
     let summary = CycleSummary {
         remote_items_seen,
-        local_events_seen: 0,
+        local_events_seen,
         ops_applied,
         conflicts_detected,
     };
@@ -161,6 +174,114 @@ async fn phase_delta_reconcile<I: IdGenerator>(
     }
 
     Ok((decisions, conflicts_detected, remote_items_seen))
+}
+
+/// Phase 2 + 3b: scan the local root, detect untracked or diverged files, and emit
+/// `Upload`/`RemoteMkdir` decisions for them.
+///
+/// Paths already covered by remote-delta decisions are skipped (the remote side wins
+/// for the first cycle's reconciliation).
+///
+/// Returns `(decisions, local_events_seen)`. `local_events_seen` counts how many paths
+/// the scan considered after the dedup filter — not the count of decisions emitted.
+async fn phase_local_uploads<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    already_decided: &HashSet<RelPath>,
+) -> Result<(Vec<Decision>, usize), EngineError> {
+    let scan = ctx
+        .local
+        .scan(&ctx.local_root)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
+
+    let mut decisions = Vec::new();
+    let mut local_events_seen = 0usize;
+
+    for (abs_path, side) in scan.entries {
+        let Some(rel_path) = rel_from_abs(&ctx.local_root, &abs_path) else {
+            continue;
+        };
+        if already_decided.contains(&rel_path) {
+            continue;
+        }
+        local_events_seen += 1;
+
+        let entry = ctx
+            .state
+            .file_entry_get(&ctx.pair_id, &rel_path)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?;
+
+        let needs_upload = entry.as_ref().is_none_or(|e| match e.sync_state {
+            FileSyncState::InFlight | FileSyncState::PendingConflict => false,
+            _ => local_diverges_from_synced(&side, e.synced.as_ref()),
+        });
+        if !needs_upload {
+            continue;
+        }
+
+        let new_entry = FileEntry {
+            pair_id: ctx.pair_id,
+            relative_path: rel_path.clone(),
+            kind: side.kind,
+            sync_state: FileSyncState::PendingUpload,
+            local: Some(side.clone()),
+            remote: entry.as_ref().and_then(|e| e.remote.clone()),
+            synced: entry.as_ref().and_then(|e| e.synced.clone()),
+            pending_op_id: entry.as_ref().and_then(|e| e.pending_op_id),
+            updated_at: ctx.clock.now(),
+        };
+        ctx.state
+            .file_entry_upsert(&new_entry)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?;
+
+        let kind = if side.kind == FileKind::Directory {
+            DecisionKind::RemoteMkdir
+        } else {
+            DecisionKind::Upload
+        };
+        decisions.push(Decision {
+            pair_id: ctx.pair_id,
+            relative_path: rel_path,
+            kind,
+        });
+    }
+
+    Ok((decisions, local_events_seen))
+}
+
+/// Return the `RelPath` that `abs` represents under `root`, or `None` when:
+/// * `abs` is not a child of `root`,
+/// * the relative portion is empty (i.e. `abs == root`),
+/// * or the relative string fails `RelPath` validation.
+fn rel_from_abs(root: &AbsPath, abs: &Path) -> Option<RelPath> {
+    let abs_str = abs.to_str()?;
+    let rel = abs_str.strip_prefix(root.as_str())?.trim_start_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    rel.parse().ok()
+}
+
+/// Heuristic local-vs-synced divergence check.
+///
+/// Directory pairs are treated as identical (folders have no content). For files we
+/// compare `size_bytes` then `mtime`; either mismatch forces an upload. We deliberately
+/// avoid hashing here — the scan does not populate `content_hash` and `LocalFs::hash` is
+/// expensive on every cycle. False positives are acceptable; false negatives (skipping
+/// a real edit) would be a correctness bug.
+fn local_diverges_from_synced(side: &FileSide, synced: Option<&FileSide>) -> bool {
+    let Some(synced) = synced else {
+        return true;
+    };
+    if side.kind == FileKind::Directory && synced.kind == FileKind::Directory {
+        return false;
+    }
+    if side.size_bytes != synced.size_bytes {
+        return true;
+    }
+    side.mtime != synced.mtime
 }
 
 /// Phase 5: execute each op with retries; returns the count of ops that succeeded.

@@ -140,6 +140,7 @@ fn local_differs_from_synced(local: Option<&FileSide>, synced: Option<&FileSide>
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
@@ -240,6 +241,32 @@ mod tests {
         let entry = blank_entry(p, rp.clone());
         let d = reconcile_one(p, rp, Some(&entry), None);
         assert_eq!(d.kind, DecisionKind::LocalDelete);
+    }
+
+    #[test]
+    fn initial_sync_collision_is_conflict() {
+        // M12b initial-sync case: phase_local_uploads has populated entry.local from
+        // a local scan but no synced snapshot exists yet, and the same path appears in
+        // the remote delta. Without hashes to compare, the engine reports a conflict
+        // rather than silently picking a side.
+        let p = pair();
+        let rp = path("collide.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        entry.local = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 5,
+            content_hash: None,
+            mtime: ts(100),
+            etag: None,
+            remote_item_id: None,
+        });
+        entry.synced = None;
+        let remote = remote_file("r1", "collide.txt", 5);
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        match d.kind {
+            DecisionKind::Conflict { .. } => {}
+            other => panic!("expected Conflict for initial-sync collision, got {other:?}"),
+        }
     }
 
     #[test]
