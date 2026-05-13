@@ -10,7 +10,8 @@
 // LINT: `match Some(x) { ... }` is the readable shape for these one-off Option branches.
 #![allow(clippy::option_if_let_else)]
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
@@ -67,6 +68,11 @@ pub struct DispatchCtx {
     pub scheduler: SchedulerHandle,
     /// Process-global subscription registry; `audit.tail` registers here.
     pub subscriptions: SubscriptionRegistry,
+    /// Path of a binary staged by `service.upgrade.prepare`. After
+    /// `service.upgrade.commit` triggers the shutdown token, the daemon's main loop
+    /// reads this slot and `exec`s into the staged binary. `None` means no upgrade is
+    /// pending.
+    pub upgrade_staging: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// Per-connection dispatch wrapper.

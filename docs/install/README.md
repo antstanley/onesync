@@ -106,6 +106,9 @@ onesync service start        # launchctl bootstrap
 onesync service doctor       # verify everything is wired correctly
 ```
 
+For in-place upgrades after the daemon is running, see
+[`upgrade.md`](upgrade.md).
+
 ## Troubleshooting
 
 - `account.login.begin` returns `APP_ERROR_BASE - 10`: `azure_ad_client_id` is unset. Re-run

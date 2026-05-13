@@ -138,6 +138,8 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
     }
 
     // Build the per-request dispatch context.
+    let upgrade_staging: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     let ctx = methods::DispatchCtx {
         started_at: std::time::Instant::now(),
         state: ports.state.clone(),
@@ -152,6 +154,7 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         state_dir: dirs.state_dir.clone(),
         scheduler: scheduler_handle,
         subscriptions: ports.subscriptions.clone(),
+        upgrade_staging: upgrade_staging.clone(),
     };
 
     // Start the IPC server. Returns when the shutdown token fires.
@@ -168,6 +171,24 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::error!(error = %e, "IPC server exited with error"),
         Err(e) => tracing::error!(error = %e, "IPC server task join error"),
+    }
+
+    // service.upgrade.commit path: if a staged binary was prepared, exec into it now.
+    // exec() replaces the current process image; on success this function never returns.
+    let staged = upgrade_staging
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(path) = staged {
+        use std::os::unix::process::CommandExt as _;
+        tracing::info!(path = %path.display(), "onesyncd exec'ing staged binary");
+        let argv0 = std::env::args().next().unwrap_or_else(|| path.display().to_string());
+        let err = std::process::Command::new(&path)
+            .arg0(argv0)
+            .args(std::env::args().skip(1))
+            .envs(std::env::vars())
+            .exec();
+        tracing::error!(error = %err, "onesyncd exec failed; exiting normally");
     }
 
     tracing::info!("onesyncd stopping");

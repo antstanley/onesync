@@ -41,6 +41,7 @@ fn make_ctx(subscriptions: SubscriptionRegistry) -> DispatchCtx {
         state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
         scheduler: onesync_daemon::scheduler::SchedulerHandle::for_tests(),
         subscriptions,
+        upgrade_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),
     }
 }
 

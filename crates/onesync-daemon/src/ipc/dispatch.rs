@@ -121,6 +121,7 @@ mod tests {
             state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
             scheduler: crate::scheduler::SchedulerHandle::for_tests(),
             subscriptions: crate::ipc::subscriptions::SubscriptionRegistry::new(),
+            upgrade_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
