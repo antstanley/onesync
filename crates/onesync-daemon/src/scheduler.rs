@@ -174,12 +174,7 @@ async fn register_initial_subscriptions(
         if client_id.is_empty() {
             continue;
         }
-        let token_source = VaultBackedTokenSource::new(
-            inputs.http.clone(),
-            inputs.vault.clone(),
-            account.id,
-            client_id,
-        );
+        let token_source = VaultBackedTokenSource::from_inputs(inputs, account.id, client_id);
         let remote =
             GraphAdapter::with_client(inputs.http.clone(), token_source, account.drive_id.clone());
         let client_state = pair.id.to_string();
@@ -214,12 +209,7 @@ async fn unregister_subscriptions(
         if client_id.is_empty() {
             continue;
         }
-        let token_source = VaultBackedTokenSource::new(
-            inputs.http.clone(),
-            inputs.vault.clone(),
-            account.id,
-            client_id,
-        );
+        let token_source = VaultBackedTokenSource::from_inputs(inputs, account.id, client_id);
         let remote = GraphAdapter::with_client(inputs.http.clone(), token_source, account.drive_id);
         if let Err(e) = remote.unsubscribe(sub_id).await {
             tracing::warn!(pair = %pair_id, sub = %sub_id, error = %e, "scheduler: graph unsubscribe failed");
@@ -279,12 +269,7 @@ async fn run_one_pair_inner(
     }
 
     // 3. Build a token source backed by the vault + refresh endpoint.
-    let token_source = VaultBackedTokenSource::new(
-        inputs.http.clone(),
-        inputs.vault.clone(),
-        account.id,
-        client_id,
-    );
+    let token_source = VaultBackedTokenSource::from_inputs(inputs, account.id, client_id);
 
     let drive_id = account.drive_id.clone();
     // 4. Build a GraphAdapter scoped to this account's drive.
@@ -401,12 +386,21 @@ async fn emit_symlink_skips(inputs: &SchedulerInputs, pair: &onesync_protocol::p
 /// `TokenSource` that loads a refresh token from a `TokenVault`, calls the Microsoft
 /// `/token` endpoint with `grant_type=refresh_token`, and caches the result until it's within
 /// `TOKEN_REFRESH_LEEWAY_S` of expiry.
+///
+/// **Resilience (M12b):** transient errors (Network, Transient) are retried with
+/// exponential backoff; `ReAuthRequired` (Microsoft revoked the token) triggers
+/// `handle_re_auth_required`, which marks every pair on the account as `Errored` and
+/// emits an `account.re_auth_required` audit event before the error propagates.
 struct VaultBackedTokenSource {
     http: reqwest::Client,
     vault: Arc<dyn TokenVault>,
     account_id: onesync_protocol::id::AccountId,
     client_id: String,
     cache: tokio::sync::Mutex<Option<CachedToken>>,
+    state: Arc<dyn StateStore>,
+    audit: Arc<dyn AuditSink>,
+    ids: Arc<UlidGenerator>,
+    clock: Arc<dyn Clock>,
 }
 
 struct CachedToken {
@@ -415,20 +409,77 @@ struct CachedToken {
     expires_in: u64,
 }
 
+/// Number of refresh attempts before giving up on transient failures (3 attempts ⇒ 2 retries).
+const TOKEN_REFRESH_MAX_ATTEMPTS: u32 = 3;
+/// Base backoff between transient-failure retries; doubled per attempt (250 ms, 500 ms).
+const TOKEN_REFRESH_BACKOFF_BASE_MS: u64 = 250;
+
 impl VaultBackedTokenSource {
-    fn new(
-        http: reqwest::Client,
-        vault: Arc<dyn TokenVault>,
+    fn from_inputs(
+        inputs: &SchedulerInputs,
         account_id: onesync_protocol::id::AccountId,
         client_id: String,
     ) -> Self {
         Self {
-            http,
-            vault,
+            http: inputs.http.clone(),
+            vault: inputs.vault.clone(),
             account_id,
             client_id,
             cache: tokio::sync::Mutex::new(None),
+            state: inputs.state.clone(),
+            audit: inputs.audit.clone(),
+            ids: inputs.ids.clone(),
+            clock: inputs.clock.clone(),
         }
+    }
+
+    /// Side effects performed once we know Microsoft has revoked our refresh token.
+    /// Marks every active pair on this account as `Errored` with a `re-auth required`
+    /// reason and emits an `account.re_auth_required` audit event.
+    async fn handle_re_auth_required(&self) {
+        use onesync_core::ports::IdGenerator;
+        use onesync_protocol::{
+            audit::AuditEvent,
+            enums::{AuditLevel, PairStatus},
+            id::AuditTag,
+        };
+
+        let now = self.clock.now();
+        let pairs = match self.state.pairs_list(Some(&self.account_id), false).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(account = %self.account_id, error = %e, "scheduler: pairs_list failed during re-auth handling");
+                Vec::new()
+            }
+        };
+        for pair in pairs {
+            let updated = onesync_protocol::pair::Pair {
+                status: PairStatus::Errored,
+                errored_reason: Some("re-auth required".to_owned()),
+                updated_at: now,
+                ..pair
+            };
+            if let Err(e) = self.state.pair_upsert(&updated).await {
+                tracing::warn!(pair = %updated.id, error = %e, "scheduler: pair_upsert failed during re-auth handling");
+            }
+        }
+        let evt = AuditEvent {
+            id: self.ids.new_id::<AuditTag>(),
+            ts: now,
+            level: AuditLevel::Error,
+            kind: "account.re_auth_required".to_owned(),
+            pair_id: None,
+            payload: {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "account_id".to_owned(),
+                    serde_json::Value::String(self.account_id.to_string()),
+                );
+                m
+            },
+        };
+        let _ = self.state.audit_append(&evt).await;
+        self.audit.emit(evt);
     }
 }
 
@@ -445,7 +496,7 @@ impl TokenSource for VaultBackedTokenSource {
                 }
             }
         }
-        // Cache miss / expiring soon: refresh.
+        // Cache miss / expiring soon: refresh, with retry on transient failure.
         let RefreshToken(rt) =
             self.vault
                 .load_refresh(&self.account_id)
@@ -453,7 +504,36 @@ impl TokenSource for VaultBackedTokenSource {
                 .map_err(|e: VaultError| GraphInternalError::Decode {
                     detail: format!("vault load failed: {e}"),
                 })?;
-        let tokens = refresh::refresh(&self.http, "common", &self.client_id, &rt).await?;
+
+        let tokens = {
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                match refresh::refresh(&self.http, "common", &self.client_id, &rt).await {
+                    Ok(t) => break t,
+                    Err(GraphInternalError::ReAuthRequired { request_id }) => {
+                        self.handle_re_auth_required().await;
+                        return Err(GraphInternalError::ReAuthRequired { request_id });
+                    }
+                    Err(e @ (GraphInternalError::Network { .. } | GraphInternalError::Transient { .. }))
+                        if attempt < TOKEN_REFRESH_MAX_ATTEMPTS =>
+                    {
+                        let delay = std::time::Duration::from_millis(
+                            TOKEN_REFRESH_BACKOFF_BASE_MS << (attempt - 1),
+                        );
+                        tracing::warn!(
+                            account = %self.account_id,
+                            attempt,
+                            ?delay,
+                            error = %e,
+                            "scheduler: token refresh retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
         // Persist rotated refresh.
         let _ = self
             .vault
@@ -560,6 +640,97 @@ mod tests {
         let after = state.pair_get(&pair.id).await.unwrap().expect("pair");
         assert_eq!(after.status, PairStatus::Initializing);
         assert!(after.delta_token.is_none());
+    }
+
+    /// Audit sink that stashes every event for assertion.
+    #[derive(Default)]
+    struct CapturingAuditSink {
+        events: std::sync::Mutex<Vec<onesync_protocol::audit::AuditEvent>>,
+    }
+    impl onesync_core::ports::AuditSink for CapturingAuditSink {
+        fn emit(&self, event: onesync_protocol::audit::AuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn account(id: AccountId) -> onesync_protocol::account::Account {
+        onesync_protocol::account::Account {
+            id,
+            kind: onesync_protocol::enums::AccountKind::Personal,
+            upn: "user@example.com".to_owned(),
+            tenant_id: "9188040d-6c67-4c5b-b112-36a304b66dad".to_owned(),
+            drive_id: onesync_protocol::primitives::DriveId::new("drive"),
+            display_name: "Test User".to_owned(),
+            keychain_ref: onesync_protocol::primitives::KeychainRef::new("ref"),
+            scopes: vec!["Files.ReadWrite".to_owned()],
+            created_at: ts(0),
+            updated_at: ts(0),
+        }
+    }
+
+    fn pair_on_account(account_id: AccountId, local: &str) -> onesync_protocol::pair::Pair {
+        onesync_protocol::pair::Pair {
+            id: pair_id(),
+            account_id,
+            local_path: local.parse::<AbsPath>().unwrap(),
+            remote_item_id: DriveItemId::new("r"),
+            remote_path: "/r".to_owned(),
+            display_name: "p".to_owned(),
+            status: PairStatus::Active,
+            paused: false,
+            delta_token: None,
+            errored_reason: None,
+            created_at: ts(0),
+            updated_at: ts(0),
+            last_sync_at: None,
+            conflict_count: 0,
+            webhook_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_re_auth_required_marks_pairs_errored_and_emits_audit() {
+        let state: Arc<dyn StateStore> = Arc::new(InMemoryStore::new());
+        let audit_capture = Arc::new(CapturingAuditSink::default());
+        let audit: Arc<dyn AuditSink> = audit_capture.clone();
+        let ids = Arc::new(UlidGenerator::default());
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock(ts(999)));
+        let acct_id = account_id();
+
+        state.account_upsert(&account(acct_id)).await.unwrap();
+        let p1 = pair_on_account(acct_id, "/tmp/p1");
+        let p2 = pair_on_account(acct_id, "/tmp/p2");
+        state.pair_upsert(&p1).await.unwrap();
+        state.pair_upsert(&p2).await.unwrap();
+
+        let source = VaultBackedTokenSource {
+            http: reqwest::Client::new(),
+            vault: Arc::new(onesync_keychain::fakes::InMemoryTokenVault::default()),
+            account_id: acct_id,
+            client_id: "cid".to_owned(),
+            cache: tokio::sync::Mutex::new(None),
+            state: state.clone(),
+            audit,
+            ids,
+            clock,
+        };
+        source.handle_re_auth_required().await;
+
+        let after1 = state.pair_get(&p1.id).await.unwrap().unwrap();
+        let after2 = state.pair_get(&p2.id).await.unwrap().unwrap();
+        assert_eq!(after1.status, PairStatus::Errored);
+        assert_eq!(after2.status, PairStatus::Errored);
+        assert_eq!(after1.errored_reason.as_deref(), Some("re-auth required"));
+        assert_eq!(after2.errored_reason.as_deref(), Some("re-auth required"));
+
+        let events: Vec<_> = audit_capture.events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "exactly one audit event");
+        assert_eq!(events[0].kind, "account.re_auth_required");
+        assert_eq!(events[0].level, onesync_protocol::enums::AuditLevel::Error);
+        assert_eq!(
+            events[0].payload.get("account_id").and_then(|v| v.as_str()),
+            Some(acct_id.to_string().as_str())
+        );
     }
 
     #[tokio::test]
