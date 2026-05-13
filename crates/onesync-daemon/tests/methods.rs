@@ -38,6 +38,7 @@ fn make_ctx() -> DispatchCtx {
         login_registry: Arc::new(onesync_daemon::login_registry::LoginRegistry::new()),
         shutdown_token: onesync_daemon::shutdown::ShutdownToken::new(),
         state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
+        scheduler: onesync_daemon::scheduler::SchedulerHandle::for_tests(),
     }
 }
 
@@ -87,6 +88,8 @@ fn assert_ok(resp: &JsonRpcResponse, method: &str) {
 }
 
 /// Assert a response is a `not_implemented` application error.
+#[allow(dead_code)]
+// LINT: retained for upcoming subscription/upgrade-flow assertions in M10.
 fn assert_not_implemented(resp: &JsonRpcResponse, method: &str) {
     match resp {
         JsonRpcResponse::Err(e) => {
@@ -188,12 +191,20 @@ async fn pair_list_returns_empty_array_on_fresh_store() {
 }
 
 #[tokio::test]
-async fn pair_force_sync_still_returns_not_implemented() {
+async fn pair_force_sync_refuses_for_unknown_pair() {
+    // M9 Task 5: force_sync now wired through the scheduler. With no pair row matching the
+    // request id, the handler should return an APP_ERROR rather than silently accepting.
     let (token, sock, _tmp) = start_server().await;
-    assert_not_implemented(
-        &roundtrip(&sock, "pair.force_sync").await,
+    let resp = roundtrip_params(
+        &sock,
         "pair.force_sync",
-    );
+        serde_json::json!({ "id": "pair_01J8X7CFGMZG7Y4DC0VA8DZW2H" }),
+    )
+    .await;
+    match resp {
+        JsonRpcResponse::Err(e) => assert!(e.error.code < 0),
+        JsonRpcResponse::Ok(_) => unreachable!("expected error for unknown pair"),
+    }
     token.trigger();
 }
 

@@ -39,6 +39,7 @@ fn make_ctx() -> DispatchCtx {
         login_registry: Arc::new(onesync_daemon::login_registry::LoginRegistry::new()),
         shutdown_token: onesync_daemon::shutdown::ShutdownToken::new(),
         state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
+        scheduler: onesync_daemon::scheduler::SchedulerHandle::for_tests(),
     }
 }
 

@@ -117,6 +117,7 @@ mod tests {
             login_registry: Arc::new(LoginRegistry::new()),
             shutdown_token: crate::shutdown::ShutdownToken::new(),
             state_dir: std::path::PathBuf::from("/tmp/onesync-test-state"),
+            scheduler: crate::scheduler::SchedulerHandle::for_tests(),
         }
     }
 

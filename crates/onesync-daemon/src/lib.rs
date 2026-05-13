@@ -12,6 +12,7 @@ pub mod lock;
 pub mod logging;
 pub mod login_registry;
 pub mod methods;
+pub mod scheduler;
 pub mod shutdown;
 pub mod startup;
 pub mod wiring;

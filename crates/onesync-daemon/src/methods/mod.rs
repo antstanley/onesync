@@ -17,6 +17,7 @@ use onesync_core::ports::{AuditSink, Clock, LocalFs, StateStore, TokenVault};
 use onesync_time::UlidGenerator;
 
 use crate::login_registry::LoginRegistry;
+use crate::scheduler::SchedulerHandle;
 use crate::shutdown::ShutdownToken;
 
 pub mod account;
@@ -59,6 +60,8 @@ pub struct DispatchCtx {
     pub shutdown_token: ShutdownToken,
     /// Daemon state directory; used by `state.backup` / `state.repair.permissions`.
     pub state_dir: std::path::PathBuf,
+    /// Handle to the engine scheduler; `pair.force_sync` pushes triggers via this.
+    pub scheduler: SchedulerHandle,
 }
 
 /// Application-level method error.

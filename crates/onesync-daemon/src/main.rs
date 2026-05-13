@@ -13,7 +13,7 @@
 
 use clap::Parser;
 use onesync_core::limits::max_runtime_workers;
-use onesync_daemon::{ipc, lock, logging, methods, shutdown, startup, wiring};
+use onesync_daemon::{ipc, lock, logging, methods, scheduler, shutdown, startup, wiring};
 
 /// Onesync background daemon.
 #[derive(Debug, Parser)]
@@ -92,6 +92,22 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
     let token = shutdown::ShutdownToken::new();
     shutdown::spawn_signal_handler(token.clone());
 
+    // Spawn the engine scheduler.
+    let host_name = hostname_or_unknown();
+    let scheduler_handle = scheduler::spawn(
+        scheduler::SchedulerInputs {
+            state: ports.state.clone(),
+            local_fs: ports.local_fs.clone(),
+            clock: ports.clock.clone(),
+            ids: ports.ids.clone(),
+            audit: ports.audit.clone(),
+            vault: ports.vault.clone(),
+            http: ports.http.clone(),
+            host_name,
+        },
+        &token,
+    );
+
     // Build the per-request dispatch context.
     let ctx = methods::DispatchCtx {
         started_at: std::time::Instant::now(),
@@ -105,6 +121,7 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         login_registry: ports.login_registry.clone(),
         shutdown_token: token.clone(),
         state_dir: dirs.state_dir.clone(),
+        scheduler: scheduler_handle,
     };
 
     // Start the IPC server. Returns when the shutdown token fires.
@@ -125,4 +142,16 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
 
     tracing::info!("onesyncd stopping");
     Ok(())
+}
+
+fn hostname_or_unknown() -> String {
+    #[allow(clippy::disallowed_methods)]
+    // LINT: gethostname-equivalent via env HOSTNAME; daemon startup may read env.
+    std::env::var("HOSTNAME").unwrap_or_else(|_| {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned())
+    })
 }

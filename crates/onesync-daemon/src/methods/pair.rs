@@ -242,15 +242,38 @@ pub async fn remove(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodEr
     Ok(json!({ "ok": true, "id": pair.id.to_string() }))
 }
 
-/// `pair.force_sync` — deferred until engine wiring lands.
-pub async fn force_sync(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::not_implemented("pair.force_sync"))
+/// `pair.force_sync` — push a manual trigger through the scheduler.
+pub async fn force_sync(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+    let p: PairByIdParams = parse_pair_id(params)?;
+    require_pair(ctx, &p.id).await?;
+    ctx.scheduler.force_sync(p.id).await.map_err(|()| {
+        MethodError::new(
+            onesync_protocol::rpc::INTERNAL_ERROR,
+            "scheduler is not accepting new triggers (shutting down?)",
+        )
+    })?;
+    Ok(json!({ "ok": true, "pair": p.id.to_string() }))
 }
 
-/// `pair.status` — deferred. Today's wiring lacks the run aggregation hooks the status object
-/// promises (delta-cursor age, in-flight ops, pending bytes).
-pub async fn status(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::not_implemented("pair.status"))
+/// `pair.status` — aggregate Pair + recent runs + unresolved-conflicts count.
+pub async fn status(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
+    let p: PairByIdParams = parse_pair_id(params)?;
+    let pair = require_pair(ctx, &p.id).await?;
+    let recent_runs = ctx
+        .state
+        .runs_recent(&pair.id, 5)
+        .await
+        .map_err(|e| MethodError::new(onesync_protocol::rpc::INTERNAL_ERROR, e.to_string()))?;
+    let unresolved = ctx
+        .state
+        .conflicts_unresolved(&pair.id)
+        .await
+        .map_err(|e| MethodError::new(onesync_protocol::rpc::INTERNAL_ERROR, e.to_string()))?;
+    Ok(json!({
+        "pair": pair,
+        "recent_runs": recent_runs,
+        "unresolved_conflicts": unresolved.len(),
+    }))
 }
 
 /// `pair.subscribe` — wired alongside the broader subscription layer.
