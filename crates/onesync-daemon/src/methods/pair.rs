@@ -273,9 +273,68 @@ pub async fn status(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError>
     }))
 }
 
-/// `pair.subscribe` — wired alongside the broader subscription streaming layer in M10.
-pub async fn subscribe(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::not_implemented("pair.subscribe"))
+#[derive(Debug, Deserialize)]
+struct PairSubscribeParams {
+    pair: PairId,
+}
+
+/// `pair.subscribe` — register a subscription for one pair's notification stream.
+///
+/// The connection's writer task delivers the resulting `JsonRpcNotification` frames over
+/// the IPC socket. The forwarder filters the global broadcast stream to notifications
+/// whose payload mentions this `pair_id`, which today covers audit events emitted by the
+/// engine (`cycle.started`, `cycle.finished`, `op.failed`, `local.symlink.skipped`,
+/// `local.case_collision.renamed`)
+/// plus future producer-side `pair.*` notifications.
+pub async fn subscribe(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
+    use crate::ipc::subscriptions::SubscriptionId;
+    use onesync_core::ports::IdGenerator;
+    use onesync_protocol::id::AuditTag;
+
+    let p: PairSubscribeParams = serde_json::from_value(params.clone()).map_err(|e| {
+        MethodError::new(
+            onesync_protocol::rpc::INVALID_PARAMS,
+            format!("invalid params: {e}"),
+        )
+    })?;
+
+    let id_str = ctx.ids.new_id::<AuditTag>().to_string();
+    let sub_id = SubscriptionId::new(format!("sub-pair-{id_str}"));
+    let mut sub_rx = ctx.subscriptions.insert(sub_id.clone());
+    let notif_tx = ctx.notif_tx.clone();
+    let want_pair_str = p.pair.to_string();
+    tokio::spawn(async move {
+        while let Some(notif) = sub_rx.recv().await {
+            if !notification_mentions_pair(&notif, &want_pair_str) {
+                continue;
+            }
+            if notif_tx.send(notif).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(json!({ "subscription_id": sub_id.to_string() }))
+}
+
+/// Returns `true` if the notification's params reference the given pair id. Matches both
+/// the `audit.event` wrapper (whose payload carries `pair_id`) and any future typed
+/// notification that includes `pair_id` at the top level of `params`.
+fn notification_mentions_pair(
+    notif: &onesync_protocol::rpc::JsonRpcNotification,
+    pair_id_str: &str,
+) -> bool {
+    let pid = notif
+        .params
+        .get("pair_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            notif
+                .params
+                .get("payload")
+                .and_then(|p| p.get("pair_id"))
+                .and_then(|v| v.as_str())
+        });
+    pid == Some(pair_id_str)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

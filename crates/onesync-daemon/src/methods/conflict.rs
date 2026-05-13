@@ -86,7 +86,66 @@ pub async fn resolve(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError
     Ok(json!({ "ok": true, "id": p.id.to_string() }))
 }
 
-/// `conflict.subscribe` — wired alongside the broader subscription layer.
-pub async fn subscribe(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::not_implemented("conflict.subscribe"))
+#[derive(Debug, Default, Deserialize)]
+struct ConflictSubscribeParams {
+    /// Optional: restrict the stream to conflicts on a single pair.
+    #[serde(default)]
+    pair: Option<PairId>,
+}
+
+/// `conflict.subscribe` — register a subscription for conflict-related notifications.
+///
+/// Today the stream surfaces audit events whose `kind` starts with `local.case_collision`
+/// or `conflict.`; future producer-side notifications can land alongside without changing
+/// the handler. `pair` narrows the filter to one pair.
+pub async fn subscribe(ctx: &ConnCtx, params: &Value) -> Result<Value, MethodError> {
+    use crate::ipc::subscriptions::SubscriptionId;
+    use onesync_core::ports::IdGenerator;
+    use onesync_protocol::id::AuditTag;
+
+    let p: ConflictSubscribeParams = if params.is_null() {
+        ConflictSubscribeParams::default()
+    } else {
+        serde_json::from_value(params.clone()).map_err(|e| {
+            MethodError::new(
+                onesync_protocol::rpc::INVALID_PARAMS,
+                format!("invalid params: {e}"),
+            )
+        })?
+    };
+
+    let id_str = ctx.ids.new_id::<AuditTag>().to_string();
+    let sub_id = SubscriptionId::new(format!("sub-conflict-{id_str}"));
+    let mut sub_rx = ctx.subscriptions.insert(sub_id.clone());
+    let notif_tx = ctx.notif_tx.clone();
+    let want_pair = p.pair.map(|id| id.to_string());
+    tokio::spawn(async move {
+        while let Some(notif) = sub_rx.recv().await {
+            if !notification_is_conflict_related(&notif) {
+                continue;
+            }
+            if let Some(want) = want_pair.as_deref()
+                && notif.params.get("pair_id").and_then(|v| v.as_str()) != Some(want)
+            {
+                continue;
+            }
+            if notif_tx.send(notif).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(json!({ "subscription_id": sub_id.to_string() }))
+}
+
+fn notification_is_conflict_related(notif: &onesync_protocol::rpc::JsonRpcNotification) -> bool {
+    if notif.method.starts_with("conflict.") {
+        return true;
+    }
+    // `audit.event` wraps an `AuditEvent` whose `kind` is the actual event name.
+    if notif.method == "audit.event"
+        && let Some(kind) = notif.params.get("kind").and_then(|v| v.as_str())
+    {
+        return kind.starts_with("conflict.") || kind.starts_with("local.case_collision");
+    }
+    false
 }
