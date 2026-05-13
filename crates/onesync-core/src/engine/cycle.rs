@@ -8,22 +8,26 @@
 //! 5. **Execute** — drive each op through the port layer.
 //! 6. **Record** — persist the `SyncRun` and emit audit events.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use onesync_protocol::{
-    enums::{FileKind, FileOpStatus, FileSyncState, RunOutcome, RunTrigger},
+    audit::AuditEvent,
+    conflict::Conflict,
+    enums::{AuditLevel, ConflictSide, FileKind, FileOpStatus, FileSyncState, RunOutcome, RunTrigger},
     file_entry::FileEntry,
     file_op::FileOp,
     file_side::FileSide,
-    id::{AuditEventId, SyncRunId},
+    id::{AuditEventId, AuditTag, ConflictTag, SyncRunId},
     path::{AbsPath, RelPath},
     primitives::DeltaCursor,
+    remote::RemoteItem,
     sync_run::SyncRun,
 };
 
 use crate::{
     engine::{
+        case_collision::{case_collision_rename_target, case_folds_equal},
         executor::{execute, is_retriable},
         observability::{cycle_finished, cycle_started, op_failed},
         planner::plan,
@@ -77,15 +81,25 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
         .emit(cycle_started(ctx.ids.new_id(), now, ctx.pair_id));
 
     // Phase 1 + 3a: delta → reconcile → decisions.
-    let (mut decisions, conflicts_detected, remote_items_seen, delta_token) =
-        phase_delta_reconcile(ctx).await?;
+    let DeltaReconcileOutcome {
+        mut decisions,
+        mut conflicts_detected,
+        remote_items_seen,
+        delta_token,
+        remote_items_by_path,
+    } = phase_delta_reconcile(ctx).await?;
 
-    // Phase 2 + 3b: local scan → upload decisions for untracked / diverged paths.
+    // Phase 2 + 3b: local scan → upload decisions for untracked / diverged paths, plus
+    // case-collision detection that renames the local loser and records a Conflict row.
     let remote_paths: HashSet<RelPath> =
         decisions.iter().map(|d| d.relative_path.clone()).collect();
-    let (local_decisions, local_events_seen) =
-        phase_local_uploads(ctx, &remote_paths).await?;
+    let LocalUploadOutcome {
+        decisions: local_decisions,
+        local_events_seen,
+        collisions_recorded,
+    } = phase_local_uploads(ctx, &remote_paths, &remote_items_by_path).await?;
     decisions.extend(local_decisions);
+    conflicts_detected += collisions_recorded;
 
     // Phase 4: plan.
     let ops = plan(decisions, run_id, now, ctx.ids);
@@ -134,19 +148,22 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     Ok(summary)
 }
 
-/// Phase 1–3: fetch delta, reconcile each item, return
-/// `(decisions, conflicts, items_seen, delta_token)`.
+/// Output of [`phase_delta_reconcile`].
+struct DeltaReconcileOutcome {
+    decisions: Vec<crate::engine::types::Decision>,
+    conflicts_detected: usize,
+    remote_items_seen: usize,
+    delta_token: Option<DeltaCursor>,
+    /// Map of remote paths (live, non-tombstoned only) to their `RemoteItem`. Used by
+    /// the local-upload phase for case-collision detection — we need the remote `FileSide`
+    /// to record a faithful `Conflict` row.
+    remote_items_by_path: HashMap<RelPath, RemoteItem>,
+}
+
+/// Phase 1–3: fetch delta, reconcile each item, return the outcome shape above.
 async fn phase_delta_reconcile<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
-) -> Result<
-    (
-        Vec<crate::engine::types::Decision>,
-        usize,
-        usize,
-        Option<DeltaCursor>,
-    ),
-    EngineError,
-> {
+) -> Result<DeltaReconcileOutcome, EngineError> {
     let delta_page = ctx
         .remote
         .delta(&ctx.drive_id, ctx.cursor.as_ref())
@@ -157,6 +174,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
     let delta_token = delta_page.delta_token.clone();
     let mut decisions = Vec::new();
     let mut conflicts_detected = 0usize;
+    let mut remote_items_by_path: HashMap<RelPath, RemoteItem> = HashMap::new();
 
     for remote_item in &delta_page.items {
         let Ok(rel_path) = remote_item.name.parse::<RelPath>() else {
@@ -172,6 +190,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
         let remote_opt = if remote_item.is_deleted() {
             None
         } else {
+            remote_items_by_path.insert(rel_path.clone(), remote_item.clone());
             Some(remote_item)
         };
 
@@ -184,21 +203,36 @@ async fn phase_delta_reconcile<I: IdGenerator>(
         decisions.push(decision);
     }
 
-    Ok((decisions, conflicts_detected, remote_items_seen, delta_token))
+    Ok(DeltaReconcileOutcome {
+        decisions,
+        conflicts_detected,
+        remote_items_seen,
+        delta_token,
+        remote_items_by_path,
+    })
 }
 
-/// Phase 2 + 3b: scan the local root, detect untracked or diverged files, and emit
-/// `Upload`/`RemoteMkdir` decisions for them.
+/// Output of [`phase_local_uploads`].
+struct LocalUploadOutcome {
+    decisions: Vec<Decision>,
+    local_events_seen: usize,
+    collisions_recorded: usize,
+}
+
+/// Phase 2 + 3b: scan the local root, detect untracked or diverged files, emit
+/// `Upload`/`RemoteMkdir` decisions for them, and resolve case-collisions by renaming
+/// the local-side loser.
 ///
 /// Paths already covered by remote-delta decisions are skipped (the remote side wins
-/// for the first cycle's reconciliation).
-///
-/// Returns `(decisions, local_events_seen)`. `local_events_seen` counts how many paths
-/// the scan considered after the dedup filter — not the count of decisions emitted.
+/// for the first cycle's reconciliation). For paths whose name case-folds-equal to a
+/// remote path but isn't byte-identical, the local file is renamed using
+/// `case_collision_rename_target` and a `Conflict` row is recorded. The renamed file
+/// then enters the upload pipeline on the next cycle as a fresh untracked path.
 async fn phase_local_uploads<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
     already_decided: &HashSet<RelPath>,
-) -> Result<(Vec<Decision>, usize), EngineError> {
+    remote_items_by_path: &HashMap<RelPath, RemoteItem>,
+) -> Result<LocalUploadOutcome, EngineError> {
     let scan = ctx
         .local
         .scan(&ctx.local_root)
@@ -207,6 +241,7 @@ async fn phase_local_uploads<I: IdGenerator>(
 
     let mut decisions = Vec::new();
     let mut local_events_seen = 0usize;
+    let mut collisions_recorded = 0usize;
 
     for (abs_path, side) in scan.entries {
         let Some(rel_path) = rel_from_abs(&ctx.local_root, &abs_path) else {
@@ -216,6 +251,14 @@ async fn phase_local_uploads<I: IdGenerator>(
             continue;
         }
         local_events_seen += 1;
+
+        // Case-collision check: another remote path differs only in case. Rename the
+        // local file and record a Conflict instead of emitting an Upload.
+        if let Some(remote_path) = find_case_collision(&rel_path, remote_items_by_path) {
+            handle_case_collision(ctx, &rel_path, &side, remote_path, remote_items_by_path).await?;
+            collisions_recorded += 1;
+            continue;
+        }
 
         let entry = ctx
             .state
@@ -259,7 +302,137 @@ async fn phase_local_uploads<I: IdGenerator>(
         });
     }
 
-    Ok((decisions, local_events_seen))
+    Ok(LocalUploadOutcome {
+        decisions,
+        local_events_seen,
+        collisions_recorded,
+    })
+}
+
+/// Return the remote path that case-folds equal to `local` but differs in byte form, or
+/// `None` if no collision is present.
+fn find_case_collision<'a>(
+    local: &RelPath,
+    remote_items_by_path: &'a HashMap<RelPath, RemoteItem>,
+) -> Option<&'a RelPath> {
+    remote_items_by_path
+        .keys()
+        .find(|remote| *remote != local && case_folds_equal(remote, local))
+}
+
+/// Rename the local-side loser, persist a `Conflict` row, and emit an audit event.
+async fn handle_case_collision<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    local_rel: &RelPath,
+    local_side: &FileSide,
+    remote_rel: &RelPath,
+    remote_items_by_path: &HashMap<RelPath, RemoteItem>,
+) -> Result<(), EngineError> {
+    let now = ctx.clock.now();
+    let rename_target_str = case_collision_rename_target(local_rel);
+    let Ok(loser_rel) = rename_target_str.parse::<RelPath>() else {
+        return Err(EngineError::Port(format!(
+            "case-collision rename produced an invalid path: {rename_target_str}"
+        )));
+    };
+    let Some(from_abs) = join_abs(&ctx.local_root, local_rel) else {
+        return Err(EngineError::Port(format!(
+            "cannot join local_root with {local_rel}"
+        )));
+    };
+    let Some(to_abs) = join_abs(&ctx.local_root, &loser_rel) else {
+        return Err(EngineError::Port(format!(
+            "cannot join local_root with {loser_rel}"
+        )));
+    };
+    ctx.local
+        .rename(&from_abs, &to_abs)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
+
+    let remote_side = remote_items_by_path
+        .get(remote_rel)
+        .map_or_else(synthetic_remote_side, |item| remote_side_from_item(item, now));
+
+    let conflict = Conflict {
+        id: ctx.ids.new_id::<ConflictTag>(),
+        pair_id: ctx.pair_id,
+        relative_path: remote_rel.clone(),
+        winner: ConflictSide::Remote,
+        loser_relative_path: loser_rel,
+        local_side: local_side.clone(),
+        remote_side,
+        detected_at: now,
+        resolved_at: None,
+        resolution: None,
+        note: None,
+    };
+    ctx.state
+        .conflict_insert(&conflict)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
+
+    let evt = AuditEvent {
+        id: ctx.ids.new_id::<AuditTag>(),
+        ts: now,
+        level: AuditLevel::Warn,
+        kind: "local.case_collision.renamed".to_owned(),
+        pair_id: Some(ctx.pair_id),
+        payload: {
+            let mut m = serde_json::Map::new();
+            m.insert(
+                "from".to_owned(),
+                serde_json::Value::String(local_rel.as_str().to_owned()),
+            );
+            m.insert(
+                "to".to_owned(),
+                serde_json::Value::String(conflict.loser_relative_path.as_str().to_owned()),
+            );
+            m.insert(
+                "remote_path".to_owned(),
+                serde_json::Value::String(remote_rel.as_str().to_owned()),
+            );
+            m
+        },
+    };
+    ctx.audit.emit(evt);
+
+    Ok(())
+}
+
+fn join_abs(root: &AbsPath, rel: &RelPath) -> Option<AbsPath> {
+    format!("{}/{}", root.as_str(), rel.as_str()).parse().ok()
+}
+
+fn remote_side_from_item(item: &RemoteItem, now: onesync_protocol::primitives::Timestamp) -> FileSide {
+    FileSide {
+        kind: if item.is_folder() {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        },
+        size_bytes: item.size,
+        content_hash: None,
+        mtime: now,
+        etag: item
+            .e_tag
+            .as_deref()
+            .map(onesync_protocol::primitives::ETag::new),
+        remote_item_id: Some(onesync_protocol::primitives::DriveItemId::new(item.id.clone())),
+    }
+}
+
+fn synthetic_remote_side() -> FileSide {
+    FileSide {
+        kind: FileKind::File,
+        size_bytes: 0,
+        content_hash: None,
+        mtime: onesync_protocol::primitives::Timestamp::from_datetime(
+            chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
+        ),
+        etag: None,
+        remote_item_id: None,
+    }
 }
 
 /// Return the `RelPath` that `abs` represents under `root`, or `None` when:
