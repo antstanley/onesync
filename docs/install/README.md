@@ -73,11 +73,16 @@ Webhooks are **opt-in and off by default**. See the decisions in
      - service: http_status:404
    ```
 
-6. Set the matching port in onesync:
+6. Set the matching port and notification URL in onesync:
 
    ```sh
-   onesync config set --webhook-listener-port 8765
+   onesync config set --webhook-listener-port 8765 \
+                      --webhook-notification-url https://onesync.example.com/callback
    ```
+
+   The daemon's scheduler reads `webhook_notification_url` at startup. When set + at least one
+   pair has `webhook_enabled = true`, the scheduler registers `/subscriptions` against Graph
+   so notifications start flowing.
 
 7. Route the hostname: `cloudflared tunnel route dns onesync onesync.example.com`.
 8. Run the tunnel: `cloudflared tunnel run onesync` (or install it as a launchd job; see

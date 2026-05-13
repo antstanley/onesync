@@ -94,9 +94,15 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
     let token = shutdown::ShutdownToken::new();
     shutdown::spawn_signal_handler(token.clone());
 
-    // Spawn the engine scheduler.
+    // Spawn the engine scheduler. If the operator has configured
+    // `webhook_notification_url` in InstanceConfig, the scheduler also registers Graph
+    // /subscriptions for every webhook_enabled pair on startup.
     let host_name = hostname_or_unknown();
-    let scheduler_handle = scheduler::spawn(
+    let webhook_url = match ports.state.config_get().await {
+        Ok(Some(cfg)) => cfg.webhook_notification_url,
+        _ => None,
+    };
+    let scheduler_handle = scheduler::spawn_with_webhooks(
         scheduler::SchedulerInputs {
             state: ports.state.clone(),
             local_fs: ports.local_fs.clone(),
@@ -108,6 +114,9 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
             host_name,
         },
         &token,
+        scheduler::WebhookConfig {
+            notification_url: webhook_url,
+        },
     );
 
     // Spawn the webhook receiver (no-op when webhook_listener_port is unset in config).

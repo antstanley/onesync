@@ -26,4 +26,10 @@ pub struct InstanceConfig {
     /// receiver; the `/delta` polling path is always available as the fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook_listener_port: Option<u16>,
+    /// Publicly-reachable HTTPS URL of the Cloudflare Tunnel that maps to the local webhook
+    /// receiver. The scheduler passes this to Graph `/subscriptions` as `notificationUrl`.
+    /// When `None`, the daemon does not register any Graph subscriptions, even for
+    /// `webhook_enabled` pairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_notification_url: Option<String>,
 }

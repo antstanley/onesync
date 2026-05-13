@@ -29,3 +29,10 @@ deltas and concrete values that the meta-rules require each project to declare.
 
 - [`install/README.md`](install/README.md) — pre-flight steps for first-time setup: Azure AD
   app registration and (optional) Cloudflare Tunnel for push notifications.
+
+## Plans
+
+The active milestone plans live in [`plans/`](plans/). The roadmap at
+[`plans/2026-05-11-roadmap.md`](plans/2026-05-11-roadmap.md) tracks status across milestones.
+The path-to-v0.1 carry-over list is at
+[`plans/2026-05-13-m12b-path-to-v01.md`](plans/2026-05-13-m12b-path-to-v01.md).

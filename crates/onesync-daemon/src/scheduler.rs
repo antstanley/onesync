@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use onesync_core::limits::{DELTA_POLL_INTERVAL_MS, TOKEN_REFRESH_LEEWAY_S};
 use onesync_core::ports::{
-    AuditSink, Clock, LocalFs, RefreshToken, StateStore, TokenVault, VaultError,
+    AuditSink, Clock, LocalFs, RefreshToken, RemoteDrive, StateStore, TokenVault, VaultError,
 };
 use onesync_graph::adapter::{GraphAdapter, TokenSource};
 use onesync_graph::auth::refresh;
@@ -76,13 +76,51 @@ pub struct SchedulerInputs {
     pub host_name: String,
 }
 
+/// Optional configuration of the webhook receiver.
+///
+/// `register_subscriptions` checks whether the daemon's notification URL is reachable; if so,
+/// it registers Graph `/subscriptions` for every `webhook_enabled = true` pair on startup and
+/// unregisters them on shutdown.
+#[derive(Clone, Debug)]
+pub struct WebhookConfig {
+    /// Public HTTPS URL the operator's Cloudflare Tunnel maps to the daemon's local receiver.
+    /// Set from `InstanceConfig.webhook_notification_url` when configured.
+    pub notification_url: Option<String>,
+}
+
 /// Spawn the scheduler task and return a [`SchedulerHandle`] for force-sync injection.
 #[must_use]
 pub fn spawn(inputs: SchedulerInputs, shutdown: &ShutdownToken) -> SchedulerHandle {
+    spawn_with_webhooks(
+        inputs,
+        shutdown,
+        WebhookConfig {
+            notification_url: None,
+        },
+    )
+}
+
+/// Variant of [`spawn`] that additionally manages Graph subscriptions for pairs with
+/// `webhook_enabled = true`. On startup it registers a subscription for each enabled pair;
+/// on shutdown it cleans them up.
+#[must_use]
+pub fn spawn_with_webhooks(
+    inputs: SchedulerInputs,
+    shutdown: &ShutdownToken,
+    webhook_cfg: WebhookConfig,
+) -> SchedulerHandle {
     let (force_tx, mut force_rx) = mpsc::channel::<PairId>(FORCE_QUEUE_DEPTH);
     let mut shutdown_rx = shutdown.subscribe();
 
     tokio::spawn(async move {
+        // Registered subscription ids keyed by pair id, so we can unsubscribe on shutdown.
+        let mut subscriptions: std::collections::HashMap<PairId, String> =
+            std::collections::HashMap::new();
+
+        if let Some(url) = webhook_cfg.notification_url.as_deref() {
+            register_initial_subscriptions(&inputs, url, &mut subscriptions).await;
+        }
+
         let mut tick = tokio::time::interval(Duration::from_millis(DELTA_POLL_INTERVAL_MS));
         // First tick fires immediately; eat it so we do not race startup with `pair.add`.
         tick.tick().await;
@@ -102,9 +140,91 @@ pub fn spawn(inputs: SchedulerInputs, shutdown: &ShutdownToken) -> SchedulerHand
                 }
             }
         }
+
+        // Best-effort cleanup of Graph subscriptions.
+        if !subscriptions.is_empty() {
+            unregister_subscriptions(&inputs, &subscriptions).await;
+        }
     });
 
     SchedulerHandle { force_tx }
+}
+
+async fn register_initial_subscriptions(
+    inputs: &SchedulerInputs,
+    notification_url: &str,
+    out: &mut std::collections::HashMap<PairId, String>,
+) {
+    let pairs = match inputs.state.pairs_active().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "scheduler: pairs_active failed during subscription init");
+            return;
+        }
+    };
+    for pair in pairs {
+        if !pair.webhook_enabled {
+            continue;
+        }
+        let Ok(Some(account)) = inputs.state.account_get(&pair.account_id).await else {
+            continue;
+        };
+        let cfg = inputs.state.config_get().await.ok().flatten();
+        let client_id = cfg.map(|c| c.azure_ad_client_id).unwrap_or_default();
+        if client_id.is_empty() {
+            continue;
+        }
+        let token_source = VaultBackedTokenSource::new(
+            inputs.http.clone(),
+            inputs.vault.clone(),
+            account.id,
+            client_id,
+        );
+        let remote =
+            GraphAdapter::with_client(inputs.http.clone(), token_source, account.drive_id.clone());
+        let client_state = pair.id.to_string();
+        match remote
+            .subscribe(&account.drive_id, notification_url, &client_state)
+            .await
+        {
+            Ok(sub_id) => {
+                tracing::info!(pair = %pair.id, sub = %sub_id, "scheduler: graph subscription registered");
+                out.insert(pair.id, sub_id);
+            }
+            Err(e) => {
+                tracing::warn!(pair = %pair.id, error = %e, "scheduler: graph subscribe failed");
+            }
+        }
+    }
+}
+
+async fn unregister_subscriptions(
+    inputs: &SchedulerInputs,
+    subscriptions: &std::collections::HashMap<PairId, String>,
+) {
+    for (pair_id, sub_id) in subscriptions {
+        let Ok(Some(pair)) = inputs.state.pair_get(pair_id).await else {
+            continue;
+        };
+        let Ok(Some(account)) = inputs.state.account_get(&pair.account_id).await else {
+            continue;
+        };
+        let cfg = inputs.state.config_get().await.ok().flatten();
+        let client_id = cfg.map(|c| c.azure_ad_client_id).unwrap_or_default();
+        if client_id.is_empty() {
+            continue;
+        }
+        let token_source = VaultBackedTokenSource::new(
+            inputs.http.clone(),
+            inputs.vault.clone(),
+            account.id,
+            client_id,
+        );
+        let remote = GraphAdapter::with_client(inputs.http.clone(), token_source, account.drive_id);
+        if let Err(e) = remote.unsubscribe(sub_id).await {
+            tracing::warn!(pair = %pair_id, sub = %sub_id, error = %e, "scheduler: graph unsubscribe failed");
+        }
+    }
 }
 
 /// Tick handler: iterate active pairs and run a `Scheduled` cycle on each non-paused one.
@@ -195,7 +315,43 @@ async fn run_one_pair_inner(
         "scheduler: cycle complete"
     );
 
+    // Emit a per-pair audit event for each symlink skipped during this cycle's scan.
+    // Per the 01-domain-model decision: scanner skips with a warning audit event.
+    emit_symlink_skips(inputs, &pair).await;
+
     Ok(())
+}
+
+/// Walk the pair root, emit one `local.symlink.skipped` audit event per encountered symlink.
+async fn emit_symlink_skips(inputs: &SchedulerInputs, pair: &onesync_protocol::pair::Pair) {
+    use onesync_core::ports::IdGenerator;
+    use onesync_protocol::{audit::AuditEvent, enums::AuditLevel, id::AuditTag};
+
+    let scan = match inputs.local_fs.scan(&pair.local_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(pair = %pair.id, error = %e, "scheduler: scan for symlinks failed");
+            return;
+        }
+    };
+    for symlink in scan.symlinks_skipped {
+        let evt = AuditEvent {
+            id: inputs.ids.new_id::<AuditTag>(),
+            ts: inputs.clock.now(),
+            level: AuditLevel::Warn,
+            kind: "local.symlink.skipped".to_owned(),
+            pair_id: Some(pair.id),
+            payload: {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "path".to_owned(),
+                    serde_json::Value::String(symlink.display().to_string()),
+                );
+                m
+            },
+        };
+        inputs.audit.emit(evt);
+    }
 }
 
 /// `TokenSource` that loads a refresh token from a `TokenVault`, calls the Microsoft

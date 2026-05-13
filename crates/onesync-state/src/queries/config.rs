@@ -18,7 +18,7 @@ use crate::queries::parse_timestamp;
 pub fn get(conn: &Connection) -> Result<Option<InstanceConfig>, StateStoreError> {
     conn.query_row(
         "SELECT log_level, notify, allow_metered, min_free_gib, updated_at, \
-                azure_ad_client_id, webhook_listener_port \
+                azure_ad_client_id, webhook_listener_port, webhook_notification_url \
          FROM instance_config WHERE id = 1",
         [],
         row_to_config,
@@ -34,8 +34,8 @@ pub fn get(conn: &Connection) -> Result<Option<InstanceConfig>, StateStoreError>
 pub fn upsert(conn: &Connection, cfg: &InstanceConfig) -> Result<(), StateStoreError> {
     conn.execute(
         "INSERT INTO instance_config (id, log_level, notify, allow_metered, min_free_gib, updated_at, \
-                                       azure_ad_client_id, webhook_listener_port) \
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?) \
+                                       azure_ad_client_id, webhook_listener_port, webhook_notification_url) \
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
             log_level = excluded.log_level, \
             notify = excluded.notify, \
@@ -43,7 +43,8 @@ pub fn upsert(conn: &Connection, cfg: &InstanceConfig) -> Result<(), StateStoreE
             min_free_gib = excluded.min_free_gib, \
             updated_at = excluded.updated_at, \
             azure_ad_client_id = excluded.azure_ad_client_id, \
-            webhook_listener_port = excluded.webhook_listener_port",
+            webhook_listener_port = excluded.webhook_listener_port, \
+            webhook_notification_url = excluded.webhook_notification_url",
         params![
             log_level_to_str(cfg.log_level),
             i32::from(cfg.notify),
@@ -52,6 +53,7 @@ pub fn upsert(conn: &Connection, cfg: &InstanceConfig) -> Result<(), StateStoreE
             cfg.updated_at.into_inner().to_rfc3339(),
             cfg.azure_ad_client_id,
             cfg.webhook_listener_port.map(i64::from),
+            cfg.webhook_notification_url,
         ],
     )
     .map(|_| ())
@@ -84,6 +86,7 @@ fn row_to_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceConfig> {
     let updated_at_str: String = row.get(4)?;
     let azure_ad_client_id: String = row.get(5)?;
     let webhook_listener_port_opt: Option<i64> = row.get(6)?;
+    let webhook_notification_url: Option<String> = row.get(7)?;
 
     Ok(InstanceConfig {
         log_level: log_level_from_str(&log_level_str)?,
@@ -93,6 +96,7 @@ fn row_to_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceConfig> {
         updated_at: parse_timestamp(&updated_at_str)?,
         azure_ad_client_id,
         webhook_listener_port: webhook_listener_port_opt.and_then(|p| u16::try_from(p).ok()),
+        webhook_notification_url,
     })
 }
 
@@ -158,6 +162,7 @@ mod tests {
             updated_at: test_timestamp(),
             azure_ad_client_id: String::new(),
             webhook_listener_port: None,
+            webhook_notification_url: None,
         };
         upsert(&conn, &custom).expect("upsert");
 
@@ -188,6 +193,7 @@ mod tests {
             updated_at: test_timestamp(),
             azure_ad_client_id: String::new(),
             webhook_listener_port: None,
+            webhook_notification_url: None,
         };
         upsert(&conn, &updated).expect("upsert");
 

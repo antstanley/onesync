@@ -75,6 +75,7 @@ pub async fn set(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError
             updated_at: now,
             azure_ad_client_id: String::new(),
             webhook_listener_port: None,
+            webhook_notification_url: None,
         },
     };
 
