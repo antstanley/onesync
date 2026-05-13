@@ -1,12 +1,9 @@
 //! `pair.*` method handlers.
 //!
-//! Implemented:
-//! - `pair.add`, `pair.list`, `pair.get`, `pair.pause`, `pair.resume`, `pair.remove`.
-//!
-//! Deferred (need scheduler/subscription integration):
-//! - `pair.force_sync` — landed alongside the engine scheduler in Task 5.
-//! - `pair.status` — landed alongside the engine scheduler in Task 5.
-//! - `pair.subscribe` — wired alongside the broader subscription layer.
+//! All CRUD methods (`add`, `list`, `get`, `pause`, `resume`, `remove`) plus the runtime
+//! methods (`force_sync`, `status`) are wired against the engine scheduler and state store.
+//! Only `pair.subscribe` remains deferred; it lands with the subscription streaming layer
+//! in M10.
 
 use onesync_core::ports::{IdGenerator, RefreshToken};
 use onesync_graph::{auth::refresh, items};
@@ -276,7 +273,7 @@ pub async fn status(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodEr
     }))
 }
 
-/// `pair.subscribe` — wired alongside the broader subscription layer.
+/// `pair.subscribe` — wired alongside the broader subscription streaming layer in M10.
 pub async fn subscribe(_ctx: &DispatchCtx, _params: &Value) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("pair.subscribe"))
 }

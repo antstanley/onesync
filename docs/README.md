@@ -24,3 +24,8 @@ The cross-project development guidelines that this project inherits live at
 <https://gist.github.com/antstanley/5bdaa85e63427fadae1c58ae6db77c27>. The
 [`development-guidelines`](spec/09-development-guidelines.md) page records the onesync-specific
 deltas and concrete values that the meta-rules require each project to declare.
+
+## Install guide
+
+- [`install/README.md`](install/README.md) — pre-flight steps for first-time setup: Azure AD
+  app registration and (optional) Cloudflare Tunnel for push notifications.

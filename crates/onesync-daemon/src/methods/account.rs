@@ -39,11 +39,10 @@ struct LoginBeginParams {
 
 /// `account.login.begin` — start the OAuth PKCE flow.
 ///
-/// Reads `azure_ad_client_id` from `InstanceConfig`. If empty, refuses with an application
-/// error directing the operator to register their own Azure AD app (see
-/// `docs/spec/04-onedrive-adapter.md`). Otherwise binds a loopback listener, generates the
-/// PKCE pair + state token, stashes a [`LoginSession`] under a new `login_handle`, spawns a
-/// task to await the redirect, and returns `{ login_handle, auth_url }`.
+/// Reads `azure_ad_client_id` from `InstanceConfig` (refuses if unset). Binds an ephemeral
+/// loopback listener, generates the PKCE pair + state token, stashes a [`LoginSession`]
+/// under a new `login_handle`, spawns a task to await the redirect, and returns
+/// `{ login_handle, auth_url }`.
 pub async fn login_begin(ctx: &DispatchCtx, params: &Value) -> Result<Value, MethodError> {
     let p: LoginBeginParams = if params.is_null() {
         LoginBeginParams::default()

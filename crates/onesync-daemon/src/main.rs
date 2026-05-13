@@ -13,7 +13,9 @@
 
 use clap::Parser;
 use onesync_core::limits::max_runtime_workers;
-use onesync_daemon::{ipc, lock, logging, methods, scheduler, shutdown, startup, wiring};
+use onesync_daemon::{
+    ipc, lock, logging, methods, scheduler, shutdown, startup, webhook_receiver, wiring,
+};
 
 /// Onesync background daemon.
 #[derive(Debug, Parser)]
@@ -107,6 +109,24 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
         },
         &token,
     );
+
+    // Spawn the webhook receiver (no-op when webhook_listener_port is unset in config).
+    let webhook_port = match ports.state.config_get().await {
+        Ok(Some(cfg)) => cfg.webhook_listener_port,
+        _ => None,
+    };
+    if let Err(e) = webhook_receiver::spawn(
+        webhook_receiver::ReceiverInputs {
+            port: webhook_port,
+            state: ports.state.clone(),
+            scheduler: scheduler_handle.clone(),
+        },
+        &token,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "webhook receiver: spawn failed");
+    }
 
     // Build the per-request dispatch context.
     let ctx = methods::DispatchCtx {

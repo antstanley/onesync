@@ -15,4 +15,5 @@ pub mod methods;
 pub mod scheduler;
 pub mod shutdown;
 pub mod startup;
+pub mod webhook_receiver;
 pub mod wiring;
