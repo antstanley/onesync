@@ -96,7 +96,28 @@ Webhooks are **opt-in and off by default**. See the decisions in
 The polling fallback stays on while the tunnel is configured; a broken tunnel only costs
 latency, not correctness.
 
-## 3. Install the daemon
+## 3. Install the binaries
+
+Either:
+
+- **Homebrew** (recommended for most users — see [`homebrew/README.md`](homebrew/README.md)):
+
+  ```sh
+  brew tap <owner>/onesync
+  brew install onesync
+  ```
+
+- **`curl | bash`** (no Homebrew dependency; the source lives at
+  [`install.sh`](install.sh)):
+
+  ```sh
+  curl -fsSL https://onesync.example.com/install.sh | bash
+  ```
+
+Both fetch the same notarised universal binary from the project's GitHub
+Releases.
+
+## 4. Install the daemon
 
 After `account login` succeeds:
 
