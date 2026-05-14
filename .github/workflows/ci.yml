@@ -27,6 +27,28 @@ jobs:
           components: rustfmt,clippy
           targets: aarch64-apple-darwin
 
+      # The pre-installed rustup on the macos-15-arm64 runner image (May 2026
+      # series) leaves a broken `~/.cargo/bin/cargo` proxy that dispatches to
+      # `rustup-init`'s installer parser instead of the active toolchain. Bypass
+      # the proxy by prepending the active toolchain's bin directory to PATH;
+      # `rustup which cargo` resolves through the working `rustup` binary.
+      - name: Pin toolchain bin to PATH
+        run: |
+          set -euo pipefail
+          rustup show
+          TOOLCHAIN_BIN="$(dirname "$(rustup which cargo)")"
+          echo "Resolved toolchain bin: $TOOLCHAIN_BIN"
+          echo "$TOOLCHAIN_BIN" >> "$GITHUB_PATH"
+
+      - name: Diagnose cargo dispatch
+        run: |
+          set -x
+          which cargo
+          cargo --version
+          rustc --version
+          rustfmt --version
+          cargo clippy --version || cargo-clippy --version
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
