@@ -14,7 +14,7 @@
 use clap::Parser;
 use onesync_core::limits::max_runtime_workers;
 use onesync_daemon::{
-    ipc, lock, logging, methods, scheduler, shutdown, startup, webhook_receiver, wiring,
+    check, ipc, lock, logging, methods, scheduler, shutdown, startup, webhook_receiver, wiring,
 };
 
 /// Onesync background daemon.
@@ -56,14 +56,26 @@ fn main() -> anyhow::Result<()> {
 
     // --check: smoke-test then exit before acquiring the advisory lock or spawning the runtime.
     if args.check {
-        let _ports = wiring::build_ports(&dirs.state_dir)?;
-        println!(
-            "onesyncd --check: ok  state={} runtime={} log={}",
-            dirs.state_dir.display(),
-            dirs.runtime_dir.display(),
-            dirs.log_dir.display()
-        );
-        return Ok(());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::anyhow!("check: failed to build runtime: {e}"))?;
+        let results = rt.block_on(async {
+            let mut out = Vec::new();
+            out.push(check::check_state_store(&dirs.state_dir));
+            out.push(check::check_keychain().await);
+            out.push(check::check_fsevents().await);
+            out.push(check::check_full_disk_access());
+            out
+        });
+        let payload = serde_json::json!({
+            "state_dir": dirs.state_dir.display().to_string(),
+            "runtime_dir": dirs.runtime_dir.display().to_string(),
+            "log_dir": dirs.log_dir.display().to_string(),
+            "checks": results,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        std::process::exit(check::aggregate_exit_code(&results));
     }
 
     // Step 2: Acquire advisory lock.

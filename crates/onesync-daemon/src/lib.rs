@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod audit_sink;
+pub mod check;
 pub mod ipc;
 pub mod lock;
 pub mod logging;
