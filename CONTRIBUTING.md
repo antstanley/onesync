@@ -10,9 +10,9 @@ must follow, and the mechanics of landing work.
    non-goals, the shape of the system. Two paragraphs in you'll know whether
    a proposed change fits the project.
 2. [`docs/spec/09-development-guidelines.md`](docs/spec/09-development-guidelines.md) —
-   the onesync-specific rules layered on top of the cross-project
-   [development guidelines gist](https://gist.github.com/antstanley/5bdaa85e63427fadae1c58ae6db77c27).
-   These are mandatory, not suggestions.
+   the self-contained development rulebook (Tiger Style philosophy, defensive
+   coding, the named-limits tables, testing pyramid, naming, AI-agent
+   checklist). Mandatory, not suggestions.
 3. [`docs/plans/2026-05-11-roadmap.md`](docs/plans/2026-05-11-roadmap.md) —
    the milestone map and current status. Each milestone has a detailed plan
    under [`docs/plans/`](docs/plans/) showing how it actually shipped.

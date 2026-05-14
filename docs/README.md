@@ -17,13 +17,8 @@ The design is documented in [`spec/`](spec/). Read in order:
 - [`spec/06-state-store.md`](spec/06-state-store.md) — SQLite schema, indexes, migrations
 - [`spec/07-cli-and-ipc.md`](spec/07-cli-and-ipc.md) — CLI commands and the JSON-RPC 2.0 contract
 - [`spec/08-installation-and-lifecycle.md`](spec/08-installation-and-lifecycle.md) — LaunchAgent plist, paths, install, upgrade, uninstall
-- [`spec/09-development-guidelines.md`](spec/09-development-guidelines.md) — onesync-specific deltas atop the repo-wide development guidelines
+- [`spec/09-development-guidelines.md`](spec/09-development-guidelines.md) — the self-contained development rulebook: Tiger Style, defensive coding, testing pyramid, naming, named limits, AI-agent checklist
 - [`spec/canonical-types.schema.json`](spec/canonical-types.schema.json) — JSON Schema (Draft 2020-12) for every domain entity and IPC payload
-
-The cross-project development guidelines that this project inherits live at
-<https://gist.github.com/antstanley/5bdaa85e63427fadae1c58ae6db77c27>. The
-[`development-guidelines`](spec/09-development-guidelines.md) page records the onesync-specific
-deltas and concrete values that the meta-rules require each project to declare.
 
 ## Install guide
 
