@@ -89,7 +89,7 @@ CREATE TABLE instance_config (
     allow_metered INTEGER NOT NULL DEFAULT 0,
     min_free_gib  INTEGER NOT NULL DEFAULT 2,
     updated_at    TEXT NOT NULL
-);
+, azure_ad_client_id TEXT NOT NULL DEFAULT '', webhook_listener_port INTEGER, webhook_notification_url TEXT);
 
 CREATE TABLE pairs (
     id                 TEXT PRIMARY KEY,
@@ -107,7 +107,7 @@ CREATE TABLE pairs (
     updated_at         TEXT NOT NULL,
     last_sync_at       TEXT,
     conflict_count     INTEGER NOT NULL DEFAULT 0
-);
+, webhook_enabled INTEGER NOT NULL DEFAULT 0);
 
 CREATE INDEX pairs_account_idx ON pairs(account_id);
 
