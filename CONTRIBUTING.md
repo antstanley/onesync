@@ -121,14 +121,17 @@ When touching audit events: every limit reached must emit
 
 ## Working in isolation (humans + agents)
 
-For non-trivial work, do it in an isolated jj workspace under
-`/Volumes/Delorean/code/onesync-<slug>` (per the agent memory convention)
-rather than in the primary checkout. The workflow:
+For non-trivial work, do it in an isolated jj workspace rather than in your
+primary checkout. Pick any path on a writable volume that is **outside** the
+main repository tree (jj rejects nested workspaces); a sibling directory
+like `../onesync-<slug>` is the conventional choice. If your environment
+already documents a different workspace root (e.g. via a CLAUDE.md / agent
+memory entry), honour that instead.
 
 ```sh
 jj new main                                     # clean shared base
-jj workspace add -r main /Volumes/Delorean/code/onesync-<slug>
-cd /Volumes/Delorean/code/onesync-<slug>
+jj workspace add -r main <workspace-path>       # e.g. ../onesync-<slug>
+cd <workspace-path>
 # … iterate …
 jj describe -m "feat(…): …"; jj new            # one commit per task
 ```
@@ -137,7 +140,7 @@ When the stack is ready, fast-forward `main` and tear the workspace down:
 
 ```sh
 jj bookmark move main --to <tip>
-jj workspace forget onesync-<slug> && rm -rf /Volumes/Delorean/code/onesync-<slug>
+jj workspace forget <workspace-name> && rm -rf <workspace-path>
 jj git push --bookmark main
 ```
 
