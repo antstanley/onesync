@@ -123,12 +123,12 @@ async fn upgrade_prepare_then_commit_triggers_shutdown() {
         }
         JsonRpcResponse::Err(e) => unreachable!("commit failed: {e:?}"),
     }
-    let triggered = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        shutdown_rx.recv(),
-    )
-    .await;
-    assert!(triggered.is_ok(), "shutdown token did not fire after commit");
+    let triggered =
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx.recv()).await;
+    assert!(
+        triggered.is_ok(),
+        "shutdown token did not fire after commit"
+    );
 
     let _ = server_handle.await;
 }

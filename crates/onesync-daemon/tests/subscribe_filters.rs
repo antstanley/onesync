@@ -50,7 +50,9 @@ fn make_ctx(subscriptions: SubscriptionRegistry) -> DispatchCtx {
     }
 }
 
-async fn start(subscriptions: SubscriptionRegistry) -> (ShutdownToken, std::path::PathBuf, TempDir) {
+async fn start(
+    subscriptions: SubscriptionRegistry,
+) -> (ShutdownToken, std::path::PathBuf, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let token = ShutdownToken::new();
     let ctx = make_ctx(subscriptions);
@@ -58,14 +60,21 @@ async fn start(subscriptions: SubscriptionRegistry) -> (ShutdownToken, std::path
     let runtime_dir = tmp.path().to_path_buf();
     let runtime_dir_clone = runtime_dir.clone();
     tokio::spawn(async move {
-        server::run(&runtime_dir_clone, token_clone, ctx).await.unwrap();
+        server::run(&runtime_dir_clone, token_clone, ctx)
+            .await
+            .unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let sock_path = runtime_dir.join(server::SOCKET_FILE);
     (token, sock_path, tmp)
 }
 
-async fn open(sock: &std::path::Path) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+async fn open(
+    sock: &std::path::Path,
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
     let stream = UnixStream::connect(sock).await.unwrap();
     let (read_half, write_half) = stream.into_split();
     (BufReader::new(read_half), write_half)
@@ -179,7 +188,12 @@ async fn conflict_subscribe_filters_to_conflict_kinds() {
     let (token, sock, _tmp) = start(reg.clone()).await;
     let (mut reader, mut write_half) = open(&sock).await;
 
-    send(&mut write_half, "conflict.subscribe", serde_json::Value::Null).await;
+    send(
+        &mut write_half,
+        "conflict.subscribe",
+        serde_json::Value::Null,
+    )
+    .await;
     let resp = read_response(&mut reader).await;
     assert!(matches!(resp, JsonRpcResponse::Ok(_)));
 
@@ -192,8 +206,7 @@ async fn conflict_subscribe_filters_to_conflict_kinds() {
     ));
     reg.broadcast(&JsonRpcNotification::new(
         "audit.event",
-        serde_json::to_value(audit_event("local.case_collision.renamed", Some(pair_id())))
-            .unwrap(),
+        serde_json::to_value(audit_event("local.case_collision.renamed", Some(pair_id()))).unwrap(),
     ));
 
     let frame = read_next_frame(&mut reader, 1500)

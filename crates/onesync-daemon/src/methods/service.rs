@@ -120,9 +120,6 @@ pub async fn upgrade_commit(ctx: &ConnCtx, _params: &Value) -> Result<Value, Met
 }
 
 /// `subscription.cancel`
-pub async fn subscription_cancel(
-    _ctx: &ConnCtx,
-    _params: &Value,
-) -> Result<Value, MethodError> {
+pub async fn subscription_cancel(_ctx: &ConnCtx, _params: &Value) -> Result<Value, MethodError> {
     Err(MethodError::not_implemented("subscription.cancel"))
 }

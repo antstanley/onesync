@@ -74,7 +74,10 @@ fn main() -> anyhow::Result<()> {
             "log_dir": dirs.log_dir.display().to_string(),
             "checks": results,
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         std::process::exit(check::aggregate_exit_code(&results));
     }
 
@@ -194,7 +197,9 @@ async fn async_main(launchd: bool, dirs: startup::DaemonDirs) -> anyhow::Result<
     if let Some(path) = staged {
         use std::os::unix::process::CommandExt as _;
         tracing::info!(path = %path.display(), "onesyncd exec'ing staged binary");
-        let argv0 = std::env::args().next().unwrap_or_else(|| path.display().to_string());
+        let argv0 = std::env::args()
+            .next()
+            .unwrap_or_else(|| path.display().to_string());
         let err = std::process::Command::new(&path)
             .arg0(argv0)
             .args(std::env::args().skip(1))

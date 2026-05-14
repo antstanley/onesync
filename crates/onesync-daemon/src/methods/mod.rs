@@ -106,10 +106,7 @@ impl ConnCtx {
     pub fn detached(base: DispatchCtx) -> Self {
         let (tx, _rx) = mpsc::channel(1);
         // Drop the receiver so the sender is immediately closed for any subsequent send.
-        Self {
-            base,
-            notif_tx: tx,
-        }
+        Self { base, notif_tx: tx }
     }
 }
 

@@ -447,6 +447,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(resp.status().is_success(), "PATCH status: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "PATCH status: {}",
+            resp.status()
+        );
     }
 }

@@ -139,8 +139,7 @@ pub fn spawn_with_webhooks(
         // First tick fires immediately; eat it so we do not race startup with `pair.add`.
         tick.tick().await;
 
-        let mut renew_tick =
-            tokio::time::interval(Duration::from_secs(SUBSCRIPTION_RENEW_TICK_S));
+        let mut renew_tick = tokio::time::interval(Duration::from_secs(SUBSCRIPTION_RENEW_TICK_S));
         renew_tick.tick().await; // skip the immediate first fire
 
         loop {
@@ -206,13 +205,7 @@ async fn register_initial_subscriptions(
             Ok(sub_id) => {
                 let expires_at = subscription_expiry_from_now();
                 tracing::info!(pair = %pair.id, sub = %sub_id, expires = %expires_at, "scheduler: graph subscription registered");
-                out.insert(
-                    pair.id,
-                    SubscriptionInfo {
-                        sub_id,
-                        expires_at,
-                    },
-                );
+                out.insert(pair.id, SubscriptionInfo { sub_id, expires_at });
             }
             Err(e) => {
                 tracing::warn!(pair = %pair.id, error = %e, "scheduler: graph subscribe failed");
@@ -439,7 +432,13 @@ async fn run_one_pair_inner(
     // touch the Pair row; the scheduler is the single writer of post-cycle state.
     let promoted_to_active =
         pair.status == PairStatus::Initializing && summary.delta_token.is_some();
-    persist_post_cycle(inputs.state.as_ref(), inputs.clock.as_ref(), &pair, &summary).await;
+    persist_post_cycle(
+        inputs.state.as_ref(),
+        inputs.clock.as_ref(),
+        &pair,
+        &summary,
+    )
+    .await;
 
     if promoted_to_active && notify_enabled {
         notify_user(
@@ -659,9 +658,10 @@ impl TokenSource for VaultBackedTokenSource {
                         self.handle_re_auth_required().await;
                         return Err(GraphInternalError::ReAuthRequired { request_id });
                     }
-                    Err(e @ (GraphInternalError::Network { .. } | GraphInternalError::Transient { .. }))
-                        if attempt < TOKEN_REFRESH_MAX_ATTEMPTS =>
-                    {
+                    Err(
+                        e @ (GraphInternalError::Network { .. }
+                        | GraphInternalError::Transient { .. }),
+                    ) if attempt < TOKEN_REFRESH_MAX_ATTEMPTS => {
                         let delay = std::time::Duration::from_millis(
                             TOKEN_REFRESH_BACKOFF_BASE_MS << (attempt - 1),
                         );

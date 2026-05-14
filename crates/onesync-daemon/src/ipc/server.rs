@@ -180,10 +180,7 @@ async fn writer_task(
 /// Parse a raw JSON line as a `JsonRpcRequest` and dispatch it.
 ///
 /// Returns a parse-error response if the JSON is invalid.
-async fn parse_and_dispatch(
-    line: &str,
-    ctx: &ConnCtx,
-) -> onesync_protocol::rpc::JsonRpcResponse {
+async fn parse_and_dispatch(line: &str, ctx: &ConnCtx) -> onesync_protocol::rpc::JsonRpcResponse {
     use onesync_protocol::rpc::{self, JsonRpcResponse};
 
     match serde_json::from_str::<onesync_protocol::rpc::JsonRpcRequest>(line) {

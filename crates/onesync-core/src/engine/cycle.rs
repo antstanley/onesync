@@ -14,7 +14,9 @@ use std::path::Path;
 use onesync_protocol::{
     audit::AuditEvent,
     conflict::Conflict,
-    enums::{AuditLevel, ConflictSide, FileKind, FileOpStatus, FileSyncState, RunOutcome, RunTrigger},
+    enums::{
+        AuditLevel, ConflictSide, FileKind, FileOpStatus, FileSyncState, RunOutcome, RunTrigger,
+    },
     file_entry::FileEntry,
     file_op::FileOp,
     file_side::FileSide,
@@ -352,7 +354,9 @@ async fn handle_case_collision<I: IdGenerator>(
 
     let remote_side = remote_items_by_path
         .get(remote_rel)
-        .map_or_else(synthetic_remote_side, |item| remote_side_from_item(item, now));
+        .map_or_else(synthetic_remote_side, |item| {
+            remote_side_from_item(item, now)
+        });
 
     let conflict = Conflict {
         id: ctx.ids.new_id::<ConflictTag>(),
@@ -404,7 +408,10 @@ fn join_abs(root: &AbsPath, rel: &RelPath) -> Option<AbsPath> {
     format!("{}/{}", root.as_str(), rel.as_str()).parse().ok()
 }
 
-fn remote_side_from_item(item: &RemoteItem, now: onesync_protocol::primitives::Timestamp) -> FileSide {
+fn remote_side_from_item(
+    item: &RemoteItem,
+    now: onesync_protocol::primitives::Timestamp,
+) -> FileSide {
     FileSide {
         kind: if item.is_folder() {
             FileKind::Directory
@@ -418,7 +425,9 @@ fn remote_side_from_item(item: &RemoteItem, now: onesync_protocol::primitives::T
             .e_tag
             .as_deref()
             .map(onesync_protocol::primitives::ETag::new),
-        remote_item_id: Some(onesync_protocol::primitives::DriveItemId::new(item.id.clone())),
+        remote_item_id: Some(onesync_protocol::primitives::DriveItemId::new(
+            item.id.clone(),
+        )),
     }
 }
 

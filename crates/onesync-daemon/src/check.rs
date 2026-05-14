@@ -87,7 +87,8 @@ pub async fn check_keychain() -> CheckResult {
     match vault.load_refresh(&probe_id).await {
         Ok(_) => CheckResult::warn(
             "keychain",
-            "probe id unexpectedly mapped to a stored credential — pick a fresh probe id".to_owned(),
+            "probe id unexpectedly mapped to a stored credential — pick a fresh probe id"
+                .to_owned(),
         ),
         Err(VaultError::NotFound) => CheckResult::pass(
             "keychain",
@@ -106,11 +107,8 @@ pub async fn check_fsevents() -> CheckResult {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let scratch = std::env::temp_dir().join(format!(
-        "onesync-check-{}-{}",
-        std::process::id(),
-        nonce
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("onesync-check-{}-{}", std::process::id(), nonce));
     if let Err(e) = std::fs::create_dir_all(&scratch) {
         return CheckResult::fail("fsevents", format!("scratch dir failed: {e}"));
     }
@@ -147,14 +145,18 @@ async fn run_fsevents_probe(scratch: &std::path::Path) -> CheckResult {
     }
 
     match tokio::time::timeout(Duration::from_secs(2), stream.0.recv()).await {
-        Ok(Some(LocalEventDto::Created(_) | LocalEventDto::Modified(_))) => {
-            CheckResult::pass("fsevents", "`FSEvents` delivered a probe write event".to_owned())
-        }
+        Ok(Some(LocalEventDto::Created(_) | LocalEventDto::Modified(_))) => CheckResult::pass(
+            "fsevents",
+            "`FSEvents` delivered a probe write event".to_owned(),
+        ),
         Ok(Some(other)) => CheckResult::warn(
             "fsevents",
             format!("`FSEvents` delivered an unexpected first event: {other:?}"),
         ),
-        Ok(None) => CheckResult::fail("fsevents", "`FSEvents` stream closed unexpectedly".to_owned()),
+        Ok(None) => CheckResult::fail(
+            "fsevents",
+            "`FSEvents` stream closed unexpectedly".to_owned(),
+        ),
         Err(_) => CheckResult::warn(
             "fsevents",
             "no `FSEvents` notification within 2s — grant Full Disk Access or check entitlements"
