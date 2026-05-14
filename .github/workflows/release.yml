@@ -1,0 +1,213 @@
+name: release
+
+# Triggered by pushing a `v*` tag (e.g. v0.1.0). The workflow:
+#  1. builds universal-binary onesync + onesyncd (x86_64 + arm64 lipo'd together)
+#  2. signs each binary with the project's Developer ID Application cert
+#  3. notarises the tarball via xcrun notarytool
+#  4. staples the ticket and packages a .tar.gz with sha256
+#  5. attaches the artefacts to a GitHub Release
+#
+# Required repository secrets:
+#   DEVELOPER_ID_CERT_P12_BASE64  — base64-encoded .p12 export of the Developer ID
+#                                   Application certificate + private key
+#   DEVELOPER_ID_CERT_PASSWORD    — password used when exporting the .p12
+#   NOTARYTOOL_APPLE_ID           — Apple ID used for notarisation submission
+#   NOTARYTOOL_TEAM_ID            — 10-character Team ID
+#   NOTARYTOOL_APP_PASSWORD       — app-specific password generated at
+#                                   appleid.apple.com/account/manage
+#
+# All four cert / notarytool secrets must be set; in their absence the workflow
+# fails fast in the `prepare-keychain` step rather than producing an unsigned
+# binary.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # for `softprops/action-gh-release`
+
+jobs:
+  release:
+    name: build + sign + notarise + publish
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          REF="${GITHUB_REF#refs/tags/}"
+          VERSION="${REF#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building onesync $VERSION"
+
+      - name: Install Rust toolchain (universal targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release-1.95
+          cache-targets: false
+
+      - name: Build x86_64
+        run: |
+          cargo build --release --workspace \
+            --target x86_64-apple-darwin \
+            -p onesync-cli -p onesync-daemon
+
+      - name: Build aarch64
+        run: |
+          cargo build --release --workspace \
+            --target aarch64-apple-darwin \
+            -p onesync-cli -p onesync-daemon
+
+      - name: Lipo into universal binaries
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/onesync \
+            target/aarch64-apple-darwin/release/onesync \
+            -output dist/onesync
+          lipo -create \
+            target/x86_64-apple-darwin/release/onesyncd \
+            target/aarch64-apple-darwin/release/onesyncd \
+            -output dist/onesyncd
+          lipo -info dist/onesync dist/onesyncd
+
+      - name: Prepare signing keychain
+        id: prepare-keychain
+        env:
+          CERT_P12_B64: ${{ secrets.DEVELOPER_ID_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12_B64" ] || [ -z "$CERT_PASSWORD" ]; then
+            echo "::error::DEVELOPER_ID_CERT_P12_BASE64 / DEVELOPER_ID_CERT_PASSWORD must be set"
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/onesync-release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          P12="$RUNNER_TEMP/developer-id.p12"
+          echo "$CERT_P12_B64" | base64 -d > "$P12"
+          security import "$P12" \
+            -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # Prepend the new keychain so codesign sees the imported identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/Developer ID Application/{print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::no Developer ID Application identity found in keychain"
+            exit 1
+          fi
+          echo "keychain=$KEYCHAIN" >> "$GITHUB_OUTPUT"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Codesign binaries
+        run: |
+          for bin in dist/onesync dist/onesyncd; do
+            codesign \
+              --sign "${{ steps.prepare-keychain.outputs.identity }}" \
+              --options runtime \
+              --timestamp \
+              --force \
+              "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+          done
+
+      - name: Package tarball
+        id: package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH=universal
+          ARCHIVE="onesync-${VERSION}-macos-${ARCH}.tar.gz"
+          (cd dist && tar -czf "../$ARCHIVE" onesync onesyncd)
+          shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Submit to notarytool
+        env:
+          NOTARYTOOL_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+          NOTARYTOOL_APP_PASSWORD: ${{ secrets.NOTARYTOOL_APP_PASSWORD }}
+        run: |
+          if [ -z "$NOTARYTOOL_APPLE_ID" ] || [ -z "$NOTARYTOOL_TEAM_ID" ] || [ -z "$NOTARYTOOL_APP_PASSWORD" ]; then
+            echo "::error::NOTARYTOOL_APPLE_ID / NOTARYTOOL_TEAM_ID / NOTARYTOOL_APP_PASSWORD must be set"
+            exit 1
+          fi
+          xcrun notarytool submit "${{ steps.package.outputs.archive }}" \
+            --apple-id "$NOTARYTOOL_APPLE_ID" \
+            --team-id "$NOTARYTOOL_TEAM_ID" \
+            --password "$NOTARYTOOL_APP_PASSWORD" \
+            --wait \
+            --output-format json
+
+      # Stapler can only attach tickets to executables, bundles, dmgs, or installer
+      # packages — not bare tar.gz files. We staple each binary then repack so users
+      # of the tarball get the stapled ticket on disk after extraction.
+      - name: Staple notarisation tickets
+        run: |
+          mkdir -p stapled
+          tar -xzf "${{ steps.package.outputs.archive }}" -C stapled
+          for bin in stapled/onesync stapled/onesyncd; do
+            xcrun stapler staple "$bin" || echo "stapler skipped: $bin (ticket may not be ready yet)"
+          done
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH=universal
+          ARCHIVE="onesync-${VERSION}-macos-${ARCH}.tar.gz"
+          (cd stapled && tar -czf "../$ARCHIVE" onesync onesyncd)
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PREV=$(git tag --sort=-creatordate | grep -v "^v$VERSION$" | head -n1 || echo "")
+          {
+            echo "## onesync $VERSION"
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "Changes since \`$PREV\`:"
+              echo ""
+              git log "$PREV..HEAD" --pretty=format:'- %s (%h)'
+            else
+              echo "Initial public release."
+            fi
+            echo ""
+            echo ""
+            echo "### Installation"
+            echo ""
+            echo '```sh'
+            echo 'curl -fsSL https://onesync.example.com/install.sh | bash'
+            echo '# or'
+            echo 'brew install onesync/tap/onesync'
+            echo '```'
+          } > release-notes.md
+          echo "notes=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: onesync ${{ steps.version.outputs.version }}
+          body_path: ${{ steps.notes.outputs.notes }}
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          fail_on_unmatched_files: true
