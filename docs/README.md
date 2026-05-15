@@ -27,7 +27,16 @@ The design is documented in [`spec/`](spec/). Read in order:
 
 ## Plans
 
-The active milestone plans live in [`plans/`](plans/). The roadmap at
-[`plans/2026-05-11-roadmap.md`](plans/2026-05-11-roadmap.md) tracks status across milestones.
-The path-to-v0.1 carry-over list is at
+The active plan is the **remediation plan** at
+[`plans/2026-05-15-remediation.md`](plans/2026-05-15-remediation.md), which closes
+all findings from the 2026-05-15 code reviews and absorbs the prior M12b
+path-to-v0.1 work. The roadmap at
+[`plans/2026-05-11-roadmap.md`](plans/2026-05-11-roadmap.md) tracks status across
+milestones. The superseded M12b plan is kept for history at
 [`plans/2026-05-13-m12b-path-to-v01.md`](plans/2026-05-13-m12b-path-to-v01.md).
+
+## Code reviews
+
+The 2026-05-15 review reports under [`reviews/`](reviews/) are the source of
+truth for the remediation plan's findings: one report per crate-group, plus a
+`BLOCKED-*.md` per blocked finding.
