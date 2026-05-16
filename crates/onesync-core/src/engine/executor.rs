@@ -53,12 +53,18 @@ pub async fn execute(
     local: &dyn LocalFs,
     remote: &dyn RemoteDrive,
 ) -> Result<FileOpStatus, ExecError> {
+    // RP1-F7: all eight op kinds dispatched. `NotImplemented` is no longer
+    // reachable through this match; the variant remains in `ExecError` for
+    // forward-compatibility with future enum additions.
     match op.kind {
         FileOpKind::LocalMkdir => execute_local_mkdir(op, local_root, local).await,
         FileOpKind::LocalDelete => execute_local_delete(op, local_root, local).await,
         FileOpKind::Download => execute_download(op, local_root, local, remote).await,
         FileOpKind::Upload => execute_upload(op, local_root, local, remote).await,
-        kind => Err(ExecError::NotImplemented { kind }),
+        FileOpKind::RemoteMkdir => execute_remote_mkdir(op, remote).await,
+        FileOpKind::RemoteDelete => execute_remote_delete(op, remote).await,
+        FileOpKind::LocalRename => execute_local_rename(op, local_root, local).await,
+        FileOpKind::RemoteRename => execute_remote_rename(op, remote).await,
     }
 }
 
@@ -145,6 +151,83 @@ async fn execute_upload(
     Ok(FileOpStatus::Success)
 }
 
+async fn execute_remote_mkdir(
+    op: &FileOp,
+    remote: &dyn RemoteDrive,
+) -> Result<FileOpStatus, ExecError> {
+    let parent_id_str = op
+        .metadata
+        .get("parent_remote_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let parent = onesync_protocol::remote::RemoteItemId(parent_id_str.to_owned());
+    let name = leaf_name(op.relative_path.as_str());
+    remote.mkdir(&parent, name).await?;
+    Ok(FileOpStatus::Success)
+}
+
+async fn execute_remote_delete(
+    op: &FileOp,
+    remote: &dyn RemoteDrive,
+) -> Result<FileOpStatus, ExecError> {
+    let item_id_str = op
+        .metadata
+        .get("remote_item_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let item = onesync_protocol::remote::RemoteItemId(item_id_str.to_owned());
+    match remote.delete(&item).await {
+        Ok(()) | Err(crate::ports::GraphError::NotFound) => Ok(FileOpStatus::Success),
+        Err(e) => Err(ExecError::Remote(e)),
+    }
+}
+
+async fn execute_local_rename(
+    op: &FileOp,
+    local_root: &AbsPath,
+    local: &dyn LocalFs,
+) -> Result<FileOpStatus, ExecError> {
+    let new_path_str = op
+        .metadata
+        .get("new_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            ExecError::Local(LocalFsError::InvalidPath {
+                reason: "LocalRename op missing metadata.new_path".to_owned(),
+            })
+        })?;
+    let from = join_path(local_root, op.relative_path.as_str())?;
+    let to = join_path(local_root, new_path_str)?;
+    local.rename(&from, &to).await?;
+    Ok(FileOpStatus::Success)
+}
+
+async fn execute_remote_rename(
+    op: &FileOp,
+    remote: &dyn RemoteDrive,
+) -> Result<FileOpStatus, ExecError> {
+    let item_id_str = op
+        .metadata
+        .get("remote_item_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let item = onesync_protocol::remote::RemoteItemId(item_id_str.to_owned());
+    // The remote rename API takes the new *leaf* name, not the full path.
+    // Prefer an explicit `new_name` metadata key; fall back to the leaf of
+    // the new path.
+    let new_name = if let Some(name) = op.metadata.get("new_name").and_then(|v| v.as_str()) {
+        name.to_owned()
+    } else if let Some(path) = op.metadata.get("new_path").and_then(|v| v.as_str()) {
+        leaf_name(path).to_owned()
+    } else {
+        return Err(ExecError::Local(LocalFsError::InvalidPath {
+            reason: "RemoteRename op missing metadata.new_name and metadata.new_path".to_owned(),
+        }));
+    };
+    remote.rename(&item, &new_name).await?;
+    Ok(FileOpStatus::Success)
+}
+
 /// Build an absolute path by joining `root` with a relative path string.
 fn join_path(root: &AbsPath, rel: &str) -> Result<AbsPath, ExecError> {
     let joined = format!("{}/{rel}", root.as_str());
@@ -153,6 +236,11 @@ fn join_path(root: &AbsPath, rel: &str) -> Result<AbsPath, ExecError> {
             reason: format!("cannot join {root} with {rel}"),
         })
     })
+}
+
+/// Return the leaf-name portion of a forward-slash-separated relative path.
+fn leaf_name(rel: &str) -> &str {
+    rel.rsplit('/').next().unwrap_or(rel)
 }
 
 #[cfg(test)]
@@ -173,5 +261,12 @@ mod tests {
             kind: FileOpKind::RemoteMkdir,
         };
         assert!(!is_retriable(&err));
+    }
+
+    #[test]
+    fn leaf_name_returns_last_segment() {
+        assert_eq!(leaf_name("a.txt"), "a.txt");
+        assert_eq!(leaf_name("docs/b.txt"), "b.txt");
+        assert_eq!(leaf_name("a/b/c.txt"), "c.txt");
     }
 }
