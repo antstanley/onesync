@@ -106,10 +106,19 @@ pub async fn upload_session_with_base(
     let all_chunks: Vec<bytes::Bytes> = chunks.collect();
     let mut offset: u64 = 0;
     let mut chunk_index = 0;
+    // RP2-F1: `chunk_start` tracks the absolute byte offset of
+    // `all_chunks[chunk_index]`'s first byte. After a 416 resume to a
+    // non-chunk-aligned offset, we slice the chunk from `offset -
+    // chunk_start` so the Content-Range matches the bytes we actually send.
+    let mut chunk_start: u64 = 0;
 
     while chunk_index < all_chunks.len() {
         let chunk = &all_chunks[chunk_index];
-        let chunk_len = chunk.len() as u64;
+        // LINT: cast is safe — chunk lengths come from a Bytes buffer ≤ usize::MAX.
+        #[allow(clippy::cast_possible_truncation)]
+        let slice_start = (offset - chunk_start) as usize;
+        let chunk_slice = chunk.slice(slice_start..);
+        let chunk_len = chunk_slice.len() as u64;
         let end = offset + chunk_len - 1;
         let content_range = format!("bytes {offset}-{end}/{total_size}");
 
@@ -119,7 +128,7 @@ pub async fn upload_session_with_base(
             .header("Content-Range", &content_range)
             .header("Content-Length", chunk_len.to_string())
             .header("client-request-id", &chunk_rid)
-            .body(chunk.to_vec())
+            .body(chunk_slice.to_vec())
             .send()
             .await
             .map_err(|e| GraphInternalError::Network {
@@ -144,13 +153,17 @@ pub async fn upload_session_with_base(
                     .map_err(|e| GraphInternalError::Decode {
                         detail: format!("416 session re-query parse failed: {e}"),
                     })?;
-            // Resume from the first expected range.
+            // RP2-F1: resume from the first expected range. The new offset
+            // may not lie on a chunk boundary; `find_chunk_index` returns
+            // both the containing chunk's index AND the start offset of
+            // that chunk so we can slice the partial tail correctly.
             if let Some(range_str) = state.next_expected_ranges.first()
                 && let Some(new_offset) = parse_range_start(range_str)
             {
-                // Fast-forward chunk_index to match the new offset.
                 offset = new_offset;
-                chunk_index = find_chunk_index(&all_chunks, new_offset);
+                let (new_idx, new_start) = find_chunk_index(&all_chunks, new_offset);
+                chunk_index = new_idx;
+                chunk_start = new_start;
                 continue;
             }
             return Err(GraphInternalError::InvalidRange {
@@ -159,9 +172,16 @@ pub async fn upload_session_with_base(
         }
 
         if status == reqwest::StatusCode::ACCEPTED {
-            // 202: server acknowledged the chunk; continue with next.
+            // 202: server acknowledged the slice; advance past these bytes.
             offset += chunk_len;
-            chunk_index += 1;
+            // RP2-F1: only move to the next chunk-index when we've consumed
+            // the current chunk's full remaining tail. The partial-resume
+            // case (slice_start > 0) typically lands offset on the next
+            // chunk boundary, but we re-check explicitly to be safe.
+            if offset >= chunk_start + chunk.len() as u64 {
+                chunk_index += 1;
+                chunk_start = offset;
+            }
             continue;
         }
 
@@ -196,15 +216,25 @@ fn parse_range_start(range_str: &str) -> Option<u64> {
     range_str.split('-').next()?.parse().ok()
 }
 
-fn find_chunk_index(chunks: &[bytes::Bytes], target_offset: u64) -> usize {
-    let mut off = 0u64;
+/// RP2-F1: returns `(chunk_index, chunk_start)` for the chunk whose
+/// half-open byte range `[chunk_start, chunk_start + len)` contains
+/// `target_offset`. When `target_offset` is past the last chunk's end, the
+/// returned index is `chunks.len()` and `chunk_start` is the total byte
+/// length — the caller's loop sees `chunk_index >= len` and exits.
+///
+/// The previous implementation returned the *next* chunk after the offset:
+/// `target_offset = 3` against `chunks = [5, 5]` returned `1`, skipping
+/// bytes 3–4 entirely and sending mis-aligned Content-Ranges to Graph.
+fn find_chunk_index(chunks: &[bytes::Bytes], target_offset: u64) -> (usize, u64) {
+    let mut cum_off = 0u64;
     for (i, chunk) in chunks.iter().enumerate() {
-        if off >= target_offset {
-            return i;
+        let chunk_len = chunk.len() as u64;
+        if target_offset < cum_off + chunk_len {
+            return (i, cum_off);
         }
-        off += chunk.len() as u64;
+        cum_off += chunk_len;
     }
-    chunks.len()
+    (chunks.len(), cum_off)
 }
 
 fn new_request_id() -> String {
@@ -285,6 +315,46 @@ mod tests {
 
         assert_eq!(item.id, "uploaded-item");
         assert_eq!(item.name, "big.bin");
+    }
+
+    // RP2-F1: find_chunk_index unit tests pin the corrected math.
+
+    #[test]
+    fn rp2_f1_find_chunk_index_target_zero_returns_first_chunk() {
+        let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+        assert_eq!(find_chunk_index(&chunks, 0), (0, 0));
+    }
+
+    #[test]
+    fn rp2_f1_find_chunk_index_within_first_chunk_returns_first_chunk() {
+        let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+        // Byte 3 lives in chunk 0 (range [0, 5)); pre-fix this returned 1.
+        assert_eq!(find_chunk_index(&chunks, 3), (0, 0));
+    }
+
+    #[test]
+    fn rp2_f1_find_chunk_index_at_boundary_returns_next_chunk_with_correct_start() {
+        let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+        assert_eq!(find_chunk_index(&chunks, 5), (1, 5));
+    }
+
+    #[test]
+    fn rp2_f1_find_chunk_index_within_second_chunk_returns_second_chunk() {
+        let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+        assert_eq!(find_chunk_index(&chunks, 7), (1, 5));
+    }
+
+    #[test]
+    fn rp2_f1_find_chunk_index_past_end_returns_len() {
+        let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+        assert_eq!(find_chunk_index(&chunks, 10), (2, 10));
+        assert_eq!(find_chunk_index(&chunks, 999), (2, 10));
+    }
+
+    #[test]
+    fn rp2_f1_find_chunk_index_empty_returns_zero() {
+        let chunks: Vec<Bytes> = Vec::new();
+        assert_eq!(find_chunk_index(&chunks, 0), (0, 0));
     }
 
     #[tokio::test]
