@@ -23,5 +23,6 @@ pub mod items;
 pub mod ops;
 pub mod throttle;
 pub mod upload;
+pub mod urls;
 
 pub use adapter::{GraphAdapter, GraphAdapterError};

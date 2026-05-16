@@ -131,8 +131,12 @@ pub async fn mkdir(
 
     if status == reqwest::StatusCode::CONFLICT {
         // 409 nameAlreadyExists — fetch the existing folder.
+        // RP2-F4: percent-encode segments to keep special characters
+        // out of the URL path.
+        let name_enc = crate::urls::encode_segment(name);
+        let parent_enc = crate::urls::encode_segment(parent_item_id);
         let existing_url = format!(
-            "{GRAPH_BASE}/drives/{}/items/{parent_item_id}:/{name}",
+            "{GRAPH_BASE}/drives/{}/items/{parent_enc}:/{name_enc}",
             drive_id.as_str()
         );
         let get_rid = new_request_id();

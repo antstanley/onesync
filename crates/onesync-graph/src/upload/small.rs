@@ -34,8 +34,12 @@ pub async fn upload_small(
         });
     }
 
+    // RP2-F4: percent-encode the filename segment so `#`, `?`, ` `, `:` etc.
+    // don't truncate or hijack the URL.
+    let name_enc = crate::urls::encode_segment(name);
+    let parent_enc = crate::urls::encode_segment(parent_item_id);
     let url = format!(
-        "{GRAPH_BASE}/drives/{}/items/{parent_item_id}:/{name}:/content?@microsoft.graph.conflictBehavior=replace",
+        "{GRAPH_BASE}/drives/{}/items/{parent_enc}:/{name_enc}:/content?@microsoft.graph.conflictBehavior=replace",
         drive_id.as_str()
     );
     upload_small_to(http, token, &url, bytes).await

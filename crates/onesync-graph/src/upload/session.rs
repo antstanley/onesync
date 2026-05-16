@@ -56,8 +56,11 @@ pub async fn upload_session(
     total_size: u64,
     chunks: impl Iterator<Item = bytes::Bytes>,
 ) -> Result<RemoteItem, GraphInternalError> {
+    // RP2-F4: percent-encode segments so special characters don't break the URL.
+    let name_enc = crate::urls::encode_segment(name);
+    let parent_enc = crate::urls::encode_segment(parent_item_id);
     let session_url = format!(
-        "{GRAPH_BASE}/drives/{}/items/{parent_item_id}:/{name}:/createUploadSession",
+        "{GRAPH_BASE}/drives/{}/items/{parent_enc}:/{name_enc}:/createUploadSession",
         drive_id.as_str()
     );
     upload_session_with_base(http, token, &session_url, total_size, chunks).await

@@ -220,17 +220,12 @@ fn new_request_id() -> String {
 }
 
 fn encode_path(path: &str) -> String {
-    // Minimal percent-encoding: encode characters that must be encoded in a path segment
-    // but keep '/' as-is (it's the path delimiter).
-    path.chars()
-        .flat_map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | '~') {
-                vec![c]
-            } else {
-                format!("%{:02X}", c as u32).chars().collect::<Vec<_>>()
-            }
-        })
-        .collect()
+    // RP2-F4: delegate to the shared `crate::urls::encode_path` helper. The
+    // previous local implementation encoded the Unicode codepoint as a
+    // single `%XX` byte for non-ASCII characters, which produces an invalid
+    // sequence for anything outside `\x00..=\x7F`; the shared helper encodes
+    // each UTF-8 byte.
+    crate::urls::encode_path(path)
 }
 
 #[cfg(test)]

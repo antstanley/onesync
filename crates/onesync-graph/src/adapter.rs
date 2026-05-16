@@ -184,11 +184,13 @@ impl RemoteDrive for GraphAdapter {
         }
 
         let token = self.token().await?;
+        // RP2-F4: percent-encode segments so names with `#`, `?`, ` `, `:`,
+        // or non-ASCII don't truncate or hijack the URL.
+        let name_enc = crate::urls::encode_segment(name);
+        let parent_enc = crate::urls::encode_segment(parent.as_str());
         let session_create_url = format!(
-            "https://graph.microsoft.com/v1.0/drives/{}/items/{}:/{}:/createUploadSession",
-            self.drive_id.as_str(),
-            parent.as_str(),
-            name
+            "https://graph.microsoft.com/v1.0/drives/{}/items/{parent_enc}:/{name_enc}:/createUploadSession",
+            self.drive_id.as_str()
         );
         let body = SessionBody {
             item: SessionItem {
