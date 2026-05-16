@@ -91,6 +91,27 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
         remote_items_by_path,
     } = phase_delta_reconcile(ctx).await?;
 
+    // RP1-F10: advance the pair's persisted delta cursor after every delta-page
+    // item has been written into `FileEntry.remote` by `phase_delta_reconcile`.
+    // Per `docs/spec/03-sync-engine.md` lines 102-105 the cursor must not move
+    // before per-item persistence completes. If the Pair row is absent (legacy
+    // tests, in-flight init) we silently skip — the cycle is still valid as a
+    // decision computer.
+    if let Some(mut pair) = ctx
+        .state
+        .pair_get(&ctx.pair_id)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?
+        && pair.delta_token != delta_token
+    {
+        pair.delta_token.clone_from(&delta_token);
+        pair.updated_at = ctx.clock.now();
+        ctx.state
+            .pair_upsert(&pair)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?;
+    }
+
     // Phase 2 + 3b: local scan → upload decisions for untracked / diverged paths, plus
     // case-collision detection that renames the local loser and records a Conflict row.
     let remote_paths: HashSet<RelPath> =
@@ -195,6 +216,27 @@ async fn phase_delta_reconcile<I: IdGenerator>(
             remote_items_by_path.insert(rel_path.clone(), remote_item.clone());
             Some(remote_item)
         };
+
+        let now = ctx.clock.now();
+        let new_remote = remote_opt.map(|item| remote_side_from_item(item, now));
+
+        // RP1-F10: persist this page's remote-side observation into
+        // `FileEntry.remote` so it survives across the cursor advance
+        // (spec `03-sync-engine.md` lines 102-105). Tombstones for paths we
+        // never tracked are no-ops — nothing to merge.
+        if let Some(persisted) = build_remote_observation(
+            ctx.pair_id,
+            &rel_path,
+            entry.as_ref(),
+            remote_opt,
+            new_remote,
+            now,
+        ) {
+            ctx.state
+                .file_entry_upsert(&persisted)
+                .await
+                .map_err(|e| EngineError::Port(e.to_string()))?;
+        }
 
         let decision = reconcile_one(ctx.pair_id, rel_path, entry.as_ref(), remote_opt);
 
@@ -406,6 +448,50 @@ async fn handle_case_collision<I: IdGenerator>(
 
 fn join_abs(root: &AbsPath, rel: &RelPath) -> Option<AbsPath> {
     format!("{}/{}", root.as_str(), rel.as_str()).parse().ok()
+}
+
+/// Build the `FileEntry` shape to persist for one delta-page observation.
+///
+/// Returns `None` only when the item is a tombstone for a path we never
+/// tracked — there is no existing row to merge into and no live remote-side
+/// data to record, so no upsert is required.
+///
+/// When an entry already exists, the only field touched is `remote` (and
+/// `updated_at`); the rest of the row — `local`, `synced`, `sync_state`,
+/// `pending_op_id` — is preserved so concurrent local-side work isn't
+/// clobbered. When no entry exists and the item is live, a fresh row is
+/// created in `PendingDownload` state per spec's initial-sync rule.
+fn build_remote_observation(
+    pair_id: onesync_protocol::id::PairId,
+    rel_path: &RelPath,
+    existing: Option<&FileEntry>,
+    remote_opt: Option<&RemoteItem>,
+    new_remote: Option<FileSide>,
+    now: onesync_protocol::primitives::Timestamp,
+) -> Option<FileEntry> {
+    if let Some(existing) = existing {
+        return Some(FileEntry {
+            remote: new_remote,
+            updated_at: now,
+            ..existing.clone()
+        });
+    }
+    let item = remote_opt?;
+    Some(FileEntry {
+        pair_id,
+        relative_path: rel_path.clone(),
+        kind: if item.is_folder() {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        },
+        sync_state: FileSyncState::PendingDownload,
+        local: None,
+        remote: new_remote,
+        synced: None,
+        pending_op_id: None,
+        updated_at: now,
+    })
 }
 
 fn remote_side_from_item(
