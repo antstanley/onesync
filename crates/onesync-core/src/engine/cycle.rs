@@ -1179,10 +1179,15 @@ async fn phase_execute<I: IdGenerator>(
     let mut failed = 0usize;
 
     for mut op in ops {
-        ctx.state
-            .op_insert(&op)
-            .await
-            .map_err(|e| EngineError::Port(e.to_string()))?;
+        // RP1-F12: state-store failures are now isolated per op. A poison
+        // op (unique-constraint race, transient SQLite busy) no longer
+        // torpedoes the rest of the plan — we audit, count it as failed,
+        // and continue with the next op.
+        if let Err(e) = ctx.state.op_insert(&op).await {
+            emit_op_state_failure(ctx, &op, "op_insert", &e);
+            failed += 1;
+            continue;
+        }
 
         let mut attempt: u32 = 0;
         loop {
@@ -1192,10 +1197,13 @@ async fn phase_execute<I: IdGenerator>(
             // computed delay before each non-first attempt.
             match retry_decision(attempt, pseudo_jitter(attempt)) {
                 RetryDecision::Exhausted => {
-                    ctx.state
+                    if let Err(e) = ctx
+                        .state
                         .op_update_status(&op.id, FileOpStatus::Failed)
                         .await
-                        .map_err(|e| EngineError::Port(e.to_string()))?;
+                    {
+                        emit_op_state_failure(ctx, &op, "op_update_status(Failed)", &e);
+                    }
                     failed += 1;
                     break;
                 }
@@ -1208,15 +1216,26 @@ async fn phase_execute<I: IdGenerator>(
             op.attempts = attempt + 1;
             match execute(&op, &ctx.local_root, ctx.local, ctx.remote).await {
                 Ok(status) => {
-                    ctx.state
-                        .op_update_status(&op.id, status)
-                        .await
-                        .map_err(|e| EngineError::Port(e.to_string()))?;
+                    if let Err(e) = ctx.state.op_update_status(&op.id, status).await {
+                        emit_op_state_failure(ctx, &op, "op_update_status(success path)", &e);
+                    }
                     if status == FileOpStatus::Success {
                         // RP1-F11: reflect the post-op state on FileEntry.synced
                         // and transition sync_state to Clean per spec
                         // `03-sync-engine.md` lines 230-231.
-                        update_file_entry_post_op(ctx, &op).await?;
+                        if let Err(e) = update_file_entry_post_op(ctx, &op).await {
+                            // Engine-side failure during post-op update —
+                            // log and count as success-with-warning rather
+                            // than abandoning the whole cycle.
+                            let fail_id: AuditEventId = ctx.ids.new_id();
+                            ctx.audit.emit(op_failed(
+                                fail_id,
+                                ctx.clock.now(),
+                                ctx.pair_id,
+                                op.relative_path.as_str(),
+                                &format!("post-op update: {e}"),
+                            ));
+                        }
                         applied += 1;
                     } else {
                         failed += 1;
@@ -1226,9 +1245,7 @@ async fn phase_execute<I: IdGenerator>(
                 Err(e) if is_retriable(&e) => {
                     // RP1-F9: a Graph `Throttled` error carries a
                     // server-supplied `retry_after_s` we must respect or
-                    // risk an account-level ban. The generic backoff
-                    // computed above is for transient/network errors that
-                    // don't carry their own deadline.
+                    // risk an account-level ban.
                     if let crate::engine::executor::ExecError::Remote(
                         crate::ports::GraphError::Throttled { retry_after_s },
                     ) = &e
@@ -1238,10 +1255,13 @@ async fn phase_execute<I: IdGenerator>(
                     attempt += 1;
                 }
                 Err(e) => {
-                    ctx.state
+                    if let Err(e2) = ctx
+                        .state
                         .op_update_status(&op.id, FileOpStatus::Failed)
                         .await
-                        .map_err(|e2| EngineError::Port(e2.to_string()))?;
+                    {
+                        emit_op_state_failure(ctx, &op, "op_update_status(error path)", &e2);
+                    }
                     let fail_id: AuditEventId = ctx.ids.new_id();
                     ctx.audit.emit(op_failed(
                         fail_id,
@@ -1320,6 +1340,25 @@ async fn update_file_entry_post_op<I: IdGenerator>(
         .await
         .map_err(|e| EngineError::Port(e.to_string()))?;
     Ok(())
+}
+
+/// RP1-F12: emit a `file_op_failed` audit event for a per-op state-store
+/// failure during `phase_execute`. Used in place of `?`-propagating the
+/// error so a poison op doesn't kill the whole cycle.
+fn emit_op_state_failure<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    op: &FileOp,
+    context: &str,
+    error: &crate::ports::StateError,
+) {
+    let fail_id: AuditEventId = ctx.ids.new_id();
+    ctx.audit.emit(op_failed(
+        fail_id,
+        ctx.clock.now(),
+        ctx.pair_id,
+        op.relative_path.as_str(),
+        &format!("{context}: {error}"),
+    ));
 }
 
 /// Deterministic pseudo-jitter for use without a random source.
