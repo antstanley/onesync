@@ -1224,7 +1224,7 @@ async fn phase_execute<I: IdGenerator>(
                 RetryDecision::Exhausted => {
                     if let Err(e) = ctx
                         .state
-                        .op_update_status(&op.id, FileOpStatus::Failed)
+                        .op_update_status(&op.id, FileOpStatus::Failed, op.attempts)
                         .await
                     {
                         emit_op_state_failure(ctx, &op, "op_update_status(Failed)", &e);
@@ -1241,7 +1241,11 @@ async fn phase_execute<I: IdGenerator>(
             op.attempts = attempt + 1;
             match execute(&op, &ctx.local_root, ctx.local, ctx.remote).await {
                 Ok(status) => {
-                    if let Err(e) = ctx.state.op_update_status(&op.id, status).await {
+                    if let Err(e) = ctx
+                        .state
+                        .op_update_status(&op.id, status, op.attempts)
+                        .await
+                    {
                         emit_op_state_failure(ctx, &op, "op_update_status(success path)", &e);
                     }
                     if status == FileOpStatus::Success {
@@ -1282,7 +1286,7 @@ async fn phase_execute<I: IdGenerator>(
                 Err(e) => {
                     if let Err(e2) = ctx
                         .state
-                        .op_update_status(&op.id, FileOpStatus::Failed)
+                        .op_update_status(&op.id, FileOpStatus::Failed, op.attempts)
                         .await
                     {
                         emit_op_state_failure(ctx, &op, "op_update_status(error path)", &e2);

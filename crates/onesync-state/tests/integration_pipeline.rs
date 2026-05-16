@@ -142,7 +142,7 @@ async fn full_pipeline_round_trips() {
     };
     store.op_insert(&op).await.expect("op insert");
     store
-        .op_update_status(&op.id, FileOpStatus::Success)
+        .op_update_status(&op.id, FileOpStatus::Success, 0)
         .await
         .expect("op update");
 

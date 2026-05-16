@@ -59,6 +59,7 @@ pub fn update_status(
     conn: &Connection,
     id: &FileOpId,
     status: FileOpStatus,
+    attempts: u32,
     now: &Timestamp,
 ) -> Result<(), StateStoreError> {
     let now_str = now.into_inner().to_rfc3339();
@@ -72,11 +73,13 @@ pub fn update_status(
     conn.execute(
         "UPDATE file_ops \
          SET status = ?, \
+             attempts = ?, \
              started_at = COALESCE(started_at, ?), \
              finished_at = ? \
          WHERE id = ?",
         params![
             op_status_to_str(status),
+            i64::from(attempts),
             started_at_param,
             finished_at_param,
             id.to_string(),
@@ -380,7 +383,7 @@ mod tests {
 
         let clock = TestClock::at(Utc.with_ymd_and_hms(2026, 5, 12, 11, 0, 0).unwrap());
         let now = clock.now();
-        update_status(&conn, &op.id, FileOpStatus::InProgress, &now).expect("update");
+        update_status(&conn, &op.id, FileOpStatus::InProgress, 0, &now).expect("update");
 
         // Fetch by inserting a dummy check via in_flight
         let in_flight_ops = in_flight(&conn, &pair.id).expect("in_flight");
@@ -401,11 +404,12 @@ mod tests {
 
         let started =
             Timestamp::from_datetime(Utc.with_ymd_and_hms(2026, 5, 12, 11, 0, 0).unwrap());
-        update_status(&conn, &op.id, FileOpStatus::InProgress, &started).expect("to in_progress");
+        update_status(&conn, &op.id, FileOpStatus::InProgress, 0, &started)
+            .expect("to in_progress");
 
         let finished =
             Timestamp::from_datetime(Utc.with_ymd_and_hms(2026, 5, 12, 11, 5, 0).unwrap());
-        update_status(&conn, &op.id, FileOpStatus::Success, &finished).expect("to success");
+        update_status(&conn, &op.id, FileOpStatus::Success, 0, &finished).expect("to success");
 
         // Success ops are no longer in_flight
         let in_flight_ops = in_flight(&conn, &pair.id).expect("in_flight");
@@ -436,11 +440,12 @@ mod tests {
 
         let started =
             Timestamp::from_datetime(Utc.with_ymd_and_hms(2026, 5, 12, 11, 0, 0).unwrap());
-        update_status(&conn, &op.id, FileOpStatus::InProgress, &started).expect("to in_progress");
+        update_status(&conn, &op.id, FileOpStatus::InProgress, 0, &started)
+            .expect("to in_progress");
 
         // Transition to backoff — started_at should be preserved
         let later = Timestamp::from_datetime(Utc.with_ymd_and_hms(2026, 5, 12, 11, 1, 0).unwrap());
-        update_status(&conn, &op.id, FileOpStatus::Backoff, &later).expect("to backoff");
+        update_status(&conn, &op.id, FileOpStatus::Backoff, 1, &later).expect("to backoff");
 
         let started_at_str: Option<String> = conn
             .query_row(

@@ -183,6 +183,7 @@ impl StateStore for SqliteStore {
         &self,
         id: &FileOpId,
         status: FileOpStatus,
+        attempts: u32,
     ) -> Result<(), StateError> {
         let pool = self.pool.clone();
         let id = *id;
@@ -193,7 +194,7 @@ impl StateStore for SqliteStore {
         });
         tokio::task::spawn_blocking(move || {
             let conn = pool.get().map_err(map_err)?;
-            queries::file_ops::update_status(&conn, &id, status, &now).map_err(map_err)
+            queries::file_ops::update_status(&conn, &id, status, attempts, &now).map_err(map_err)
         })
         .await
         .map_err(|e| StateError::Io(format!("join: {e}")))?

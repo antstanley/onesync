@@ -76,11 +76,18 @@ pub trait StateStore: Send + Sync {
     async fn run_record(&self, run: &SyncRun) -> Result<(), StateError>;
     /// Insert a new file operation.
     async fn op_insert(&self, op: &FileOp) -> Result<(), StateError>;
-    /// Update a file op's status.
+    /// Update a file op's status and attempt counter.
+    ///
+    /// RP1-F8: `attempts` is the durable retry-attempt count. The engine
+    /// passes the current attempt number on every status update so the
+    /// next cycle can resume the bounded-backoff budget rather than
+    /// restarting from zero (the old behaviour, which gave each cycle
+    /// `RETRY_MAX_ATTEMPTS` fresh retries — effectively unbounded).
     async fn op_update_status(
         &self,
         id: &FileOpId,
         status: onesync_protocol::enums::FileOpStatus,
+        attempts: u32,
     ) -> Result<(), StateError>;
     /// Insert a new conflict record.
     async fn conflict_insert(&self, c: &Conflict) -> Result<(), StateError>;

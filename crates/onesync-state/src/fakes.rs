@@ -164,6 +164,7 @@ impl StateStore for InMemoryStore {
         &self,
         id: &FileOpId,
         status: FileOpStatus,
+        attempts: u32,
     ) -> Result<(), StateError> {
         // Mirror SqliteStore's UPDATE behaviour: silently no-op when the row does not exist
         // (SQLite UPDATE affecting 0 rows returns Ok(0) which is mapped to Ok(())).
@@ -171,6 +172,7 @@ impl StateStore for InMemoryStore {
         // SqliteStore's silent-success is more faithful for parity testing.
         if let Some(op) = self.file_ops.lock().expect("op lock").get_mut(id) {
             op.status = status;
+            op.attempts = attempts;
         }
         Ok(())
     }
@@ -538,7 +540,7 @@ mod tests {
         };
         store.op_insert(&op).await.unwrap();
         store
-            .op_update_status(&op_id, FileOpStatus::InProgress)
+            .op_update_status(&op_id, FileOpStatus::InProgress, 0)
             .await
             .unwrap();
 
@@ -708,7 +710,7 @@ mod tests {
         let missing_id = id::<FileOpTag>(999u128 << 64);
         // Should succeed silently (matching SqliteStore UPDATE-0-rows behaviour)
         store
-            .op_update_status(&missing_id, FileOpStatus::InProgress)
+            .op_update_status(&missing_id, FileOpStatus::InProgress, 0)
             .await
             .unwrap();
     }
