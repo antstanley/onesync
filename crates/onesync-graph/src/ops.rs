@@ -149,13 +149,25 @@ pub async fn mkdir(
             .map_err(|e| GraphInternalError::Network {
                 detail: e.to_string(),
             })?;
-        return crate::client::check_status(get_resp, &get_rid)
+        let existing: RemoteItem = crate::client::check_status(get_resp, &get_rid)
             .await?
             .json::<RemoteItem>()
             .await
             .map_err(|e| GraphInternalError::Decode {
                 detail: e.to_string(),
+            })?;
+        // RP2-F6: spec promises mkdir's 409 fallback "promotes the existing
+        // item" — that's only valid if the existing item is itself a
+        // folder. If a file already lives at the name, surface
+        // `NameConflict` so the engine handles the kind-mismatch via the
+        // documented different-kind path rather than silently treating a
+        // file as a folder.
+        if !existing.is_folder() {
+            return Err(GraphInternalError::NameConflict {
+                request_id: get_rid,
             });
+        }
+        return Ok(existing);
     }
 
     crate::client::check_status(resp, &request_id)
