@@ -75,9 +75,16 @@ async fn untracked_local_file_inserts_pending_upload_entry() {
         .await
         .unwrap()
         .expect("entry was upserted");
-    assert_eq!(entry.sync_state, FileSyncState::PendingUpload);
+    // After RP1-F11 the cycle now runs the Upload op through to success and
+    // flips `sync_state` from `PendingUpload` to `Clean`, populating
+    // `synced` from the local side. The intermediate `PendingUpload` state
+    // is only observable mid-cycle.
+    assert_eq!(entry.sync_state, FileSyncState::Clean);
     assert!(entry.local.is_some());
-    assert!(entry.synced.is_none());
+    assert!(
+        entry.synced.is_some(),
+        "post-upload synced must be populated per RP1-F11"
+    );
 }
 
 #[tokio::test]

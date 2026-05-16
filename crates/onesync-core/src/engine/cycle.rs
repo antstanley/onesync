@@ -15,7 +15,8 @@ use onesync_protocol::{
     audit::AuditEvent,
     conflict::Conflict,
     enums::{
-        AuditLevel, ConflictSide, FileKind, FileOpStatus, FileSyncState, RunOutcome, RunTrigger,
+        AuditLevel, ConflictSide, FileKind, FileOpKind, FileOpStatus, FileSyncState, RunOutcome,
+        RunTrigger,
     },
     file_entry::FileEntry,
     file_op::FileOp,
@@ -596,6 +597,12 @@ async fn phase_execute<I: IdGenerator>(
                         .op_update_status(&op.id, status)
                         .await
                         .map_err(|e| EngineError::Port(e.to_string()))?;
+                    if status == FileOpStatus::Success {
+                        // RP1-F11: reflect the post-op state on FileEntry.synced
+                        // and transition sync_state to Clean per spec
+                        // `03-sync-engine.md` lines 230-231.
+                        update_file_entry_post_op(ctx, &op).await?;
+                    }
                     ops_applied += 1;
                     break;
                 }
@@ -622,6 +629,53 @@ async fn phase_execute<I: IdGenerator>(
     }
 
     Ok(ops_applied)
+}
+
+/// Reflect a successful op onto the persisted `FileEntry`:
+/// updates `synced` to the post-op shape, flips `sync_state` to `Clean`,
+/// and clears `pending_op_id`. A missing entry (concurrent removal,
+/// inconsistent caller wiring) is a silent no-op — `FileOp.status` is the
+/// authoritative success signal, and we'd rather leave reconcile to fix any
+/// drift than fail a cycle here.
+async fn update_file_entry_post_op<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    op: &FileOp,
+) -> Result<(), EngineError> {
+    let Some(mut entry) = ctx
+        .state
+        .file_entry_get(&op.pair_id, &op.relative_path)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?
+    else {
+        return Ok(());
+    };
+
+    let now = ctx.clock.now();
+    let new_synced = match op.kind {
+        FileOpKind::Upload => entry.local.clone(),
+        FileOpKind::Download => entry.remote.clone(),
+        FileOpKind::LocalMkdir | FileOpKind::RemoteMkdir => Some(FileSide {
+            kind: FileKind::Directory,
+            size_bytes: 0,
+            content_hash: None,
+            mtime: now,
+            etag: None,
+            remote_item_id: None,
+        }),
+        FileOpKind::LocalDelete | FileOpKind::RemoteDelete => None,
+        FileOpKind::LocalRename | FileOpKind::RemoteRename => entry.synced.clone(),
+    };
+
+    entry.synced = new_synced;
+    entry.sync_state = FileSyncState::Clean;
+    entry.pending_op_id = None;
+    entry.updated_at = now;
+
+    ctx.state
+        .file_entry_upsert(&entry)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
+    Ok(())
 }
 
 /// Deterministic pseudo-jitter for use without a random source.
