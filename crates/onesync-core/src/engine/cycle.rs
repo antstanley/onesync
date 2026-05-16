@@ -213,7 +213,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
     let mut remote_items_by_path: HashMap<RelPath, RemoteItem> = HashMap::new();
 
     for remote_item in &delta_page.items {
-        let Ok(rel_path) = remote_item.name.parse::<RelPath>() else {
+        let Some(rel_path) = build_rel_path_from_item(remote_item) else {
             continue;
         };
 
@@ -505,6 +505,46 @@ fn build_remote_observation(
         pending_op_id: None,
         updated_at: now,
     })
+}
+
+/// Build the engine-side `RelPath` for one delta-page item.
+///
+/// RP1-F16: spec `docs/spec/04-onedrive-adapter.md` says a Graph `driveItem`'s
+/// `name` is only the leaf; the directory portion lives on
+/// `parent_reference.path`, shaped like `/drive/root:/Documents/Sub`. The
+/// pre-fix engine treated `name` alone as the full relative path, so any
+/// nested item was either filed under the wrong key or collided with another
+/// item that shared a leaf name.
+///
+/// The assembly rules:
+/// - `parent_reference` absent → fall back to `name` alone (legacy fakes,
+///   root-folder responses).
+/// - `parent_reference.path` is `None` → fall back to `name` alone.
+/// - The path is normalised by stripping the first `:` segment (Graph's
+///   `/drive/root:` prefix) and the leading `/`, leaving the directory part.
+///   If that part is empty, the item lives at the pair root.
+/// - Final shape: `<dir>/<name>` or just `<name>` for root-level items.
+///
+/// Returns `None` only if the assembled string fails `RelPath` validation
+/// (out-of-band characters, `..` segments, etc.).
+fn build_rel_path_from_item(item: &RemoteItem) -> Option<RelPath> {
+    let parent_dir: String = item
+        .parent_reference
+        .as_ref()
+        .and_then(|p| p.path.as_deref())
+        .map_or_else(String::new, |path| {
+            // "/drive/root:/Documents/Sub" -> "Documents/Sub"
+            // "/drive/root:"               -> ""
+            let rest = path.split_once(':').map_or(path, |(_, after)| after);
+            rest.trim_start_matches('/').to_owned()
+        });
+
+    let full = if parent_dir.is_empty() {
+        item.name.clone()
+    } else {
+        format!("{parent_dir}/{}", item.name)
+    };
+    full.parse().ok()
 }
 
 fn remote_side_from_item(
@@ -876,5 +916,59 @@ mod tests {
     #[test]
     fn rp1_f19_all_failed_is_partial_failure() {
         assert_eq!(classify_outcome(0, 3), RunOutcome::PartialFailure);
+    }
+
+    // RP1-F16: delta-page item -> RelPath assembly. The pre-fix code used
+    // `item.name.parse::<RelPath>()` which lost the directory portion.
+
+    use onesync_protocol::remote::{FileFacet, FileHashes, ParentReference, RemoteItem};
+
+    fn item_with_parent(name: &str, parent_path: Option<&str>) -> RemoteItem {
+        RemoteItem {
+            id: "id-1".to_owned(),
+            name: name.to_owned(),
+            size: 0,
+            e_tag: None,
+            c_tag: None,
+            last_modified_date_time: None,
+            file: Some(FileFacet {
+                hashes: FileHashes::default(),
+            }),
+            folder: None,
+            deleted: None,
+            parent_reference: parent_path.map(|p| ParentReference {
+                id: None,
+                drive_id: None,
+                path: Some(p.to_owned()),
+            }),
+        }
+    }
+
+    #[test]
+    fn rp1_f16_root_item_no_parent_uses_name_only() {
+        let item = item_with_parent("hello.txt", None);
+        let rel = build_rel_path_from_item(&item).expect("valid path");
+        assert_eq!(rel.as_str(), "hello.txt");
+    }
+
+    #[test]
+    fn rp1_f16_root_drive_prefix_yields_root_path() {
+        let item = item_with_parent("hello.txt", Some("/drive/root:"));
+        let rel = build_rel_path_from_item(&item).expect("valid path");
+        assert_eq!(rel.as_str(), "hello.txt");
+    }
+
+    #[test]
+    fn rp1_f16_nested_path_joins_dir_and_name() {
+        let item = item_with_parent("report.txt", Some("/drive/root:/Documents"));
+        let rel = build_rel_path_from_item(&item).expect("valid path");
+        assert_eq!(rel.as_str(), "Documents/report.txt");
+    }
+
+    #[test]
+    fn rp1_f16_deep_nested_path_preserves_segments() {
+        let item = item_with_parent("note.md", Some("/drive/root:/Documents/2026/May"));
+        let rel = build_rel_path_from_item(&item).expect("valid path");
+        assert_eq!(rel.as_str(), "Documents/2026/May/note.md");
     }
 }
