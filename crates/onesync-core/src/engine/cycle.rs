@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 
 use onesync_protocol::{
     audit::AuditEvent,
@@ -1185,6 +1186,10 @@ async fn phase_execute<I: IdGenerator>(
 
         let mut attempt: u32 = 0;
         loop {
+            // RP1-F9: honour the backoff schedule rather than busy-retrying.
+            // `retry_decision` returns `Immediate` for the first attempt and
+            // `Backoff { delay_ms }` for subsequent ones; we sleep the
+            // computed delay before each non-first attempt.
             match retry_decision(attempt, pseudo_jitter(attempt)) {
                 RetryDecision::Exhausted => {
                     ctx.state
@@ -1194,7 +1199,10 @@ async fn phase_execute<I: IdGenerator>(
                     failed += 1;
                     break;
                 }
-                RetryDecision::Immediate | RetryDecision::Backoff { .. } => {}
+                RetryDecision::Immediate => {}
+                RetryDecision::Backoff { delay_ms } => {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
             }
 
             op.attempts = attempt + 1;
@@ -1216,6 +1224,17 @@ async fn phase_execute<I: IdGenerator>(
                     break;
                 }
                 Err(e) if is_retriable(&e) => {
+                    // RP1-F9: a Graph `Throttled` error carries a
+                    // server-supplied `retry_after_s` we must respect or
+                    // risk an account-level ban. The generic backoff
+                    // computed above is for transient/network errors that
+                    // don't carry their own deadline.
+                    if let crate::engine::executor::ExecError::Remote(
+                        crate::ports::GraphError::Throttled { retry_after_s },
+                    ) = &e
+                    {
+                        tokio::time::sleep(Duration::from_secs(*retry_after_s)).await;
+                    }
                     attempt += 1;
                 }
                 Err(e) => {
