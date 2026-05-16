@@ -33,7 +33,7 @@ use crate::engine::conflict::pick_winner_and_loser;
 
 use crate::{
     engine::{
-        case_collision::{case_collision_rename_target, case_folds_equal},
+        case_collision::{case_collision_rename_target, case_fold_key, case_folds_equal},
         executor::{execute, is_retriable},
         observability::{cycle_finished, cycle_started, op_failed},
         planner::plan,
@@ -988,8 +988,12 @@ fn detect_remote_case_collisions(
         std::collections::HashMap::new();
     for item in items {
         if let Some(p) = build_rel_path_from_item(item) {
+            // RP1-F15: bucket by the Unicode-aware case-fold key so the
+            // engine's collision detection matches what APFS actually
+            // folds (NFC + Unicode lowercase). Sharing `case_fold_key`
+            // with `case_folds_equal` guarantees the two sides agree.
             buckets
-                .entry(p.as_str().to_ascii_lowercase())
+                .entry(case_fold_key(p.as_str()))
                 .or_default()
                 .push(p);
         }

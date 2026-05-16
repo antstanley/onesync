@@ -13,6 +13,7 @@
 //! observes two entries whose NFC-normalised lowercase forms match.
 
 use blake3::Hasher;
+use unicode_normalization::UnicodeNormalization;
 
 use onesync_protocol::path::RelPath;
 
@@ -54,13 +55,30 @@ fn short_hash(bytes: &[u8]) -> String {
     hex.as_str()[..HASH_HEX_LEN].to_owned()
 }
 
-/// Returns `true` if two relative paths case-fold to the same string.
+/// Returns `true` if two relative paths case-fold to the same string under
+/// the rule APFS applies: NFC-normalise, then Unicode-lowercase, then
+/// byte-compare. RP1-F15.
 ///
-/// The comparison is ASCII-lowercase only — extending to full Unicode case folding is
-/// possible later if real-world filenames need it.
+/// The lowercase mapping is `str::to_lowercase`, which performs the standard
+/// Unicode `Lowercase_Mapping` transformation. This is locale-independent
+/// and matches what APFS folds for the common Latin-extended cases
+/// (`naïve` vs `NAÏVE`, `Straße` vs `STRASSE`).
+///
+/// Note: this only governs in-engine comparisons. The persistent `SQLite`
+/// lookup index (`file_entry_get_ci`'s `COLLATE NOCASE`) is still ASCII-
+/// only because `SQLite`'s built-in collations don't include Unicode;
+/// promoting that to a stored-canonical-form column is a separate workitem.
 #[must_use]
 pub fn case_folds_equal(a: &RelPath, b: &RelPath) -> bool {
-    a.as_str().eq_ignore_ascii_case(b.as_str())
+    case_fold_key(a.as_str()) == case_fold_key(b.as_str())
+}
+
+/// Canonical case-fold key for a relative path string. Shared with
+/// `phase_delta_reconcile::detect_remote_case_collisions` so the engine's
+/// bucket keys agree with `case_folds_equal`.
+#[must_use]
+pub fn case_fold_key(s: &str) -> String {
+    s.nfc().collect::<String>().to_lowercase()
 }
 
 #[cfg(test)]
@@ -114,6 +132,28 @@ mod tests {
             &rp("Report.pdf"),
             &rp("Report-other.pdf")
         ));
+    }
+
+    /// RP1-F15: Unicode case fold covers Latin-extended pairs that ASCII-only
+    /// `eq_ignore_ascii_case` missed.
+    #[test]
+    fn case_folds_equal_matches_unicode_case() {
+        assert!(case_folds_equal(&rp("naïve.txt"), &rp("NAÏVE.txt")));
+        assert!(case_folds_equal(&rp("résumé.pdf"), &rp("RÉSUMÉ.PDF")));
+    }
+
+    /// RP1-F15: NFC normalisation collapses pre-composed and decomposed
+    /// forms of accented characters to the same fold key.
+    #[test]
+    fn case_folds_equal_normalises_nfc() {
+        // `é` precomposed (U+00E9) vs decomposed `e` + U+0301 (combining acute).
+        let precomposed = "caf\u{00e9}.txt";
+        let decomposed = "cafe\u{0301}.txt";
+        assert_eq!(
+            case_fold_key(precomposed),
+            case_fold_key(decomposed),
+            "NFC normalisation must collapse precomposed and decomposed forms"
+        );
     }
 
     #[test]
