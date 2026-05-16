@@ -781,6 +781,27 @@ async fn handle_case_collision<I: IdGenerator>(
         .await
         .map_err(|e| EngineError::Port(e.to_string()))?;
 
+    // RP1-F29: clear the local side of the `FileEntry` at the *original*
+    // local path. The file has been moved to `loser_relative_path`; leaving
+    // the entry's `local` field referencing the old path produces a
+    // spurious `LocalDelete` + `Upload` churn on the next cycle. If no
+    // entry exists for the path (the typical case-collision-on-first-
+    // observation flow), nothing to do.
+    if let Some(mut existing) = ctx
+        .state
+        .file_entry_get(&ctx.pair_id, local_rel)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?
+    {
+        existing.local = None;
+        existing.sync_state = FileSyncState::PendingConflict;
+        existing.updated_at = now;
+        ctx.state
+            .file_entry_upsert(&existing)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?;
+    }
+
     let evt = AuditEvent {
         id: ctx.ids.new_id::<AuditTag>(),
         ts: now,
