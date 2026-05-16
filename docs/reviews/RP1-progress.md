@@ -1,20 +1,55 @@
 # RP1 (sync engine) — remediation progress
 
 **Last update:** 2026-05-16
-**Head:** main at `ddd670f6`
+**Head:** main at `0675c31f`
 **Plan:** `docs/plans/2026-05-15-remediation.md`
 **Source review:** `docs/reviews/2026-05-15-sync-engine.md`
 
 ## Status
 
-**All 14 RP1 BUGs closed.** All three follow-ons (F4 op-group, F14 auto-rename, F24 auto-rename) landed. Full-workspace verification gates clean:
+**All 14 RP1 BUGs closed.** All three BUG-follow-ons (F4 op-group, F14 auto-rename, F24 auto-rename) landed. **9 of 13 CONCERNs + 1 of 2 NITs landed** in the post-BUG batch.
+
+Full-workspace verification gates clean:
 
 - `cargo fmt --all -- --check` — PASS
 - `cargo run -p xtask -- check-schema` — PASS
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS
-- `cargo nextest run --workspace` — 348 passed, 5 skipped (baseline +36 new tests, zero regressions)
+- `cargo nextest run --workspace` — 351 passed, 5 skipped (baseline +39 new tests, zero regressions)
 
-RP1 CONCERNs (13) and NITs (2) remain.
+## CONCERN / NIT progress
+
+| F | Title | Status | Commit |
+|---|---|---|---|
+| F8 | Retry counter not persisted across cycles | ✅ done — `op_update_status` carries attempts | `0675c31f` |
+| F9 | Retry loop ignores backoff delay | ✅ done — `tokio::time::sleep` + `Throttled.retry_after_s` | `611c38f6` |
+| F12 | State-store error halts entire cycle | ✅ done — per-op isolation | `2b768a46` |
+| F15 | Case-fold ASCII-only | ✅ done — NFC + Unicode lowercase | `58049f0f` |
+| F18 | No actual concurrency in `phase_execute` | ⏳ deferred (large structural — semaphores + JoinSet) | — |
+| F20 | Deterministic `pseudo_jitter` in production | ✅ done — `getrandom`-based real jitter | `c39d5583` |
+| F21 | `RemoteDrive::download` eager `Vec<u8>` | ⏳ deferred (port streaming refactor) | — |
+| F22 | Missing op metadata → silent empty string | ⚠ partial — `InvalidOp` for rename/mkdir/delete; upload/download wait on planner metadata population | `fa6dca71` |
+| F23 | No pair lock — concurrent triggers race | ⏳ deferred (large structural — type-system enforcement) | — |
+| F25 | Conflict steps 2+3 wholly unwired | ⚠ partial — winner=Remote auto-resolves via the F4 follow-on; winner=Local still defers | (F4 follow-on `ddd670f6`) |
+| F26 | Scheduler stub; no live trigger paths | ⏳ deferred (daemon-side wiring, RP5 territory) | — |
+| F28 | Quiescence check duplicated | ✅ done — `reconcile::is_action_blocking` centralised | `ed71d553` |
+| F29 | Case-collision bypasses `FileEntry.synced` semantics | ✅ done — clears `local` + transitions to PendingConflict | `b2ac8120` |
+| F30 | Equality predicate omits `kind` | ✅ done — kind flip caught in `remote_differs_from_synced` | `ce8a6f4d` |
+| F27 | `unwrap_or_default` cleanups (NIT) | ⚠ partial — `synthetic_remote_side` + 4 executor sites cleaned; 2 remain on `execute_download`/`execute_upload` (couples with F22) | `fa6dca71` |
+| F13 | Conflict-filename spec mismatch (NIT-tilting-BUG) | ✅ done in BUG tier | `8c9ab3b4` |
+
+## Remaining at the end of RP1
+
+Five items remain — three are structural enough to deserve their own commit-set, two are partials that close once their structural dependency lands:
+
+- **F18 concurrency.** `phase_execute` is serial. Spec wants bounded concurrency (`PAIR_CONCURRENT_TRANSFERS`, `MAX_CONCURRENT_TRANSFERS`). Needs `tokio::sync::Semaphore` for global + per-pair caps and a `JoinSet` for parallel op execution, with care around mkdir-before-create ordering. Substantial refactor.
+- **F21 download streaming.** `RemoteDrive::download` returns `RemoteReadStream(Vec<u8>)` — full file in memory. For 10 GiB files (the `MAX_FILE_SIZE_BYTES` ceiling) this is multiple full copies during the executor's `Vec.to_vec()` step. Port shape needs an actual `AsyncRead`-style stream type.
+- **F23 pair lock.** Spec phase 0 requires "Acquire pair lock (single-cycle-per-pair invariant)". Currently no lock. Needs a type-encoded `PairLock` parameter on `run_cycle` (or a `Mutex` in the scheduler crate).
+- **F25 winner=Local auto-resolve.** The F4 follow-on closed winner=Remote auto-resolution. winner=Local needs `RemoteRename` + `Upload`, and the Upload needs `parent_remote_id` — which the planner doesn't yet populate. Couples with the same planner-metadata work F22 waits on.
+- **F26 scheduler wiring.** The scheduler in `onesync-core` is a stub; the live trigger paths (Scheduled, LocalEvent, RemoteWebhook, CliForce, BackoffRetry) live in `onesync-daemon`. Properly an RP5 concern.
+
+Plus the small **F22 / F27 partial**: cleaning up `execute_upload`/`execute_download`'s `unwrap_or_default` cases. This unblocks once the planner populates `parent_remote_id` / `remote_item_id` metadata on the ops it emits — same prereq as F25 winner=Local and the broader F22 close. The right shape is probably a `populate_op_metadata` post-planner pass in `run_cycle` that reads `FileEntry` + `Pair` to fill metadata.
+
+The five deferred items + the small partial are all flagged with their RP-prefix or `// TODO RP1-Fxx` comments inline. None are blocking for RP2.
 
 | F | Title | Status | Commit |
 |---|---|---|---|
