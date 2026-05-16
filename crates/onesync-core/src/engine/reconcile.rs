@@ -115,12 +115,14 @@ fn reconcile_both(entry: &FileEntry, remote: &RemoteItem) -> DecisionKind {
             {
                 return DecisionKind::NoOp;
             }
-            // The caller resolves the conflict with pick_winner_and_loser; here we
-            // just signal that one exists. The loser_path is filled by the planner.
-            DecisionKind::Conflict {
-                winner: onesync_protocol::enums::ConflictSide::Remote,
-                loser_path: entry.relative_path.clone(),
-            }
+            // RP1-F3: emit the pre-policy `ConflictDetected` variant. The
+            // conflict-resolution step in the cycle (per spec lines 194-208,
+            // pending RP1-F4) will compute the winner + loser_path via
+            // `pick_winner_and_loser` and re-express the decision as
+            // `DecisionKind::Conflict`. The previous placeholder
+            // (`winner: Remote, loser_path: relative_path`) was type-
+            // indistinguishable from a resolved decision.
+            DecisionKind::ConflictDetected
         }
     }
 }
@@ -330,10 +332,11 @@ mod tests {
         entry.synced = None;
         let remote = remote_file("r1", "collide.txt", 5);
         let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
-        match d.kind {
-            DecisionKind::Conflict { .. } => {}
-            other => panic!("expected Conflict for initial-sync collision, got {other:?}"),
-        }
+        assert!(
+            d.kind.is_conflict(),
+            "expected a conflict variant for initial-sync collision, got {:?}",
+            d.kind
+        );
     }
 
     /// Helper: a non-empty content hash (`FileSide::identifies_same_content_as`
@@ -407,8 +410,8 @@ mod tests {
     }
 
     /// Negative control: when neither size match nor etag match holds, the
-    /// engine still reports `Conflict` — F1's strict equality preserves the
-    /// "no silent data drop" guarantee.
+    /// engine still reports `ConflictDetected` — F1's strict equality
+    /// preserves the "no silent data drop" guarantee.
     #[test]
     fn both_diverged_without_evidence_remains_conflict() {
         let p = pair();
@@ -433,10 +436,11 @@ mod tests {
         let mut remote = remote_file("r1", "a.txt", 200);
         remote.e_tag = Some("v9".to_owned());
         let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
-        match d.kind {
-            DecisionKind::Conflict { .. } => {}
-            other => panic!("expected Conflict, got {other:?}"),
-        }
+        assert!(
+            d.kind.is_conflict(),
+            "expected a conflict variant, got {:?}",
+            d.kind
+        );
     }
 
     /// RP1-F2/F6: when `synced.etag` is `None` (initial cycle, post-clear, or

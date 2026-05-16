@@ -46,7 +46,19 @@ pub enum DecisionKind {
         /// New path.
         new_path: RelPath,
     },
-    /// A conflict was detected; resolve by keeping the winner and renaming the loser.
+    /// A conflict was detected but not yet resolved. Emitted by
+    /// [`crate::engine::reconcile`]; the winner/loser are computed later by
+    /// [`crate::engine::conflict::pick_winner_and_loser`] and the result is
+    /// re-expressed as [`Self::Conflict`].
+    ///
+    /// RP1-F3: the previous design returned `Conflict { winner: Remote,
+    /// loser_path: relative_path }` as a placeholder, which the type system
+    /// could not distinguish from a fully-resolved conflict — downstream code
+    /// that trusted the fields silently got the wrong values. Keeping the
+    /// pre-policy state as its own variant rules that out at compile time.
+    ConflictDetected,
+    /// A conflict whose winner and loser path have been resolved by the
+    /// conflict policy.
     Conflict {
         /// Which side's content is kept at `relative_path`.
         winner: ConflictSide,
@@ -60,7 +72,10 @@ pub enum DecisionKind {
 impl DecisionKind {
     /// Map to the corresponding [`FileOpKind`] for non-conflict decisions.
     ///
-    /// Returns `None` for [`DecisionKind::NoOp`] and [`DecisionKind::Conflict`].
+    /// Returns `None` for [`DecisionKind::NoOp`],
+    /// [`DecisionKind::ConflictDetected`], and [`DecisionKind::Conflict`]
+    /// — the conflict family materialises through a multi-op group, not a
+    /// single op (see spec `03-sync-engine.md` lines 194-208).
     #[must_use]
     pub const fn to_file_op_kind(&self) -> Option<FileOpKind> {
         match self {
@@ -72,8 +87,16 @@ impl DecisionKind {
             Self::RemoteMkdir => Some(FileOpKind::RemoteMkdir),
             Self::LocalRename { .. } => Some(FileOpKind::LocalRename),
             Self::RemoteRename { .. } => Some(FileOpKind::RemoteRename),
-            Self::Conflict { .. } | Self::NoOp => None,
+            Self::ConflictDetected | Self::Conflict { .. } | Self::NoOp => None,
         }
+    }
+
+    /// Whether this decision represents a conflict, in any of its forms
+    /// (pre-resolution [`Self::ConflictDetected`] or
+    /// post-resolution [`Self::Conflict`]).
+    #[must_use]
+    pub const fn is_conflict(&self) -> bool {
+        matches!(self, Self::ConflictDetected | Self::Conflict { .. })
     }
 }
 

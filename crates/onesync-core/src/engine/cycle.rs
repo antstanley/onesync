@@ -253,7 +253,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
 
         let decision = reconcile_one(ctx.pair_id, rel_path, entry.as_ref(), remote_opt);
 
-        if matches!(decision.kind, DecisionKind::Conflict { .. }) {
+        if decision.kind.is_conflict() {
             conflicts_detected += 1;
         }
 
