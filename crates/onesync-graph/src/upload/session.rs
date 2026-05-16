@@ -114,6 +114,11 @@ pub async fn upload_session_with_base(
     // non-chunk-aligned offset, we slice the chunk from `offset -
     // chunk_start` so the Content-Range matches the bytes we actually send.
     let mut chunk_start: u64 = 0;
+    // RP2-F2: bound the 416-resume loop. A misbehaving server (or a
+    // future bug in `parse_range_start` / `next_expected_ranges`) could
+    // otherwise spin this loop indefinitely. The budget mirrors the
+    // engine-level `RETRY_MAX_ATTEMPTS`.
+    let mut resume_attempts: u32 = 0;
 
     while chunk_index < all_chunks.len() {
         let chunk = &all_chunks[chunk_index];
@@ -141,6 +146,13 @@ pub async fn upload_session_with_base(
         let status = resp.status();
 
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // RP2-F2: bound the 416 resume loop.
+            resume_attempts += 1;
+            if resume_attempts > onesync_core::limits::RETRY_MAX_ATTEMPTS {
+                return Err(GraphInternalError::InvalidRange {
+                    request_id: chunk_rid,
+                });
+            }
             // 416: re-query the session to find out what ranges the server still needs.
             let state_resp =
                 http.get(&upload_url)
