@@ -544,24 +544,47 @@ fn rel_from_abs(root: &AbsPath, abs: &Path) -> Option<RelPath> {
     rel.parse().ok()
 }
 
-/// Heuristic local-vs-synced divergence check.
+/// Strict local-vs-synced divergence check.
 ///
-/// Directory pairs are treated as identical (folders have no content). For files we
-/// compare `size_bytes` then `mtime`; either mismatch forces an upload. We deliberately
-/// avoid hashing here — the scan does not populate `content_hash` and `LocalFs::hash` is
-/// expensive on every cycle. False positives are acceptable; false negatives (skipping
-/// a real edit) would be a correctness bug.
+/// RP1-F5: spec `docs/spec/03-sync-engine.md` line 149 defines equality as
+/// `(kind, size_bytes, content_hash)`; `mtime` is metadata used only as a
+/// conflict tie-break. The pre-fix code used `mtime` as a primary equality
+/// signal, which silently absorbed any same-size edit that preserved or
+/// re-set the mtime (editors that restore mtime on save, second-resolution
+/// timestamp collisions). Same-size + same-mtime made the local change
+/// invisible — a false negative that loses data.
+///
+/// New rule:
+///   - kind mismatch                          -> diverged,
+///   - both directories                       -> not diverged,
+///   - size mismatch                          -> diverged,
+///   - both files of size 0 (matching size)   -> not diverged,
+///   - both hashes present and equal          -> not diverged,
+///   - anything else                          -> diverged (conservative).
+///
+/// Conservative means we upload more often when hashes are missing on the
+/// local side (`LocalFs::scan` does not populate them by default). The
+/// trade-off is bandwidth vs silent data drop; the latter is unacceptable.
 fn local_diverges_from_synced(side: &FileSide, synced: Option<&FileSide>) -> bool {
     let Some(synced) = synced else {
         return true;
     };
-    if side.kind == FileKind::Directory && synced.kind == FileKind::Directory {
+    if side.kind != synced.kind {
+        return true;
+    }
+    if side.kind == FileKind::Directory {
         return false;
     }
     if side.size_bytes != synced.size_bytes {
         return true;
     }
-    side.mtime != synced.mtime
+    if side.size_bytes == 0 {
+        return false;
+    }
+    match (side.content_hash.as_ref(), synced.content_hash.as_ref()) {
+        (Some(l), Some(s)) => l != s,
+        _ => true,
+    }
 }
 
 /// Phase 5: execute each op with retries; returns the count of ops that succeeded.
@@ -685,4 +708,107 @@ async fn update_file_entry_post_op<I: IdGenerator>(
 /// supply true random jitter.
 const fn pseudo_jitter(attempt: u32) -> f64 {
     if attempt % 2 == 1 { 0.25 } else { 0.0 }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use onesync_protocol::{
+        enums::FileKind,
+        file_side::FileSide,
+        primitives::{ContentHash, Timestamp},
+    };
+
+    fn ts(secs: i64) -> Timestamp {
+        // LINT: tests may use Utc::now/Utc.timestamp_opt directly.
+        #[allow(clippy::disallowed_methods)]
+        Timestamp::from_datetime(Utc.timestamp_opt(secs, 0).unwrap())
+    }
+
+    fn h(byte: u8) -> ContentHash {
+        let hex: String = std::iter::repeat_n(format!("{byte:02x}"), 32).collect();
+        hex.parse().unwrap()
+    }
+
+    fn file_side(size: u64, hash: Option<ContentHash>, mtime_secs: i64) -> FileSide {
+        FileSide {
+            kind: FileKind::File,
+            size_bytes: size,
+            content_hash: hash,
+            mtime: ts(mtime_secs),
+            etag: None,
+            remote_item_id: None,
+        }
+    }
+
+    fn dir_side() -> FileSide {
+        FileSide {
+            kind: FileKind::Directory,
+            size_bytes: 0,
+            content_hash: None,
+            mtime: ts(0),
+            etag: None,
+            remote_item_id: None,
+        }
+    }
+
+    #[test]
+    fn rp1_f5_synced_absent_is_diverged() {
+        let side = file_side(10, Some(h(0xaa)), 100);
+        assert!(local_diverges_from_synced(&side, None));
+    }
+
+    #[test]
+    fn rp1_f5_both_directories_is_equal() {
+        let local = dir_side();
+        let synced = dir_side();
+        assert!(!local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    #[test]
+    fn rp1_f5_kind_mismatch_is_diverged() {
+        let local = file_side(0, None, 0);
+        let synced = dir_side();
+        assert!(local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    #[test]
+    fn rp1_f5_size_mismatch_is_diverged() {
+        let local = file_side(20, Some(h(0xaa)), 100);
+        let synced = file_side(10, Some(h(0xaa)), 100);
+        assert!(local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    #[test]
+    fn rp1_f5_both_zero_byte_files_is_equal() {
+        let local = file_side(0, None, 100);
+        let synced = file_side(0, None, 200);
+        assert!(!local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    #[test]
+    fn rp1_f5_matching_hashes_is_equal() {
+        let local = file_side(10, Some(h(0xaa)), 100);
+        let synced = file_side(10, Some(h(0xaa)), 9_999);
+        assert!(!local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    #[test]
+    fn rp1_f5_differing_hashes_is_diverged() {
+        let local = file_side(10, Some(h(0xaa)), 100);
+        let synced = file_side(10, Some(h(0xbb)), 100);
+        assert!(local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    /// The critical pre-fix bug: same size + same mtime + no hash on either
+    /// side was silently treated as "no divergence" → local edits with the
+    /// same byte count never uploaded. Post-fix this conservatively diverges.
+    #[test]
+    fn rp1_f5_same_size_same_mtime_no_hash_is_diverged() {
+        let local = file_side(10, None, 100);
+        let synced = file_side(10, None, 100);
+        assert!(local_diverges_from_synced(&local, Some(&synced)));
+    }
 }
