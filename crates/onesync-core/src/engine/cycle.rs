@@ -123,9 +123,17 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
         decisions: local_decisions,
         local_events_seen,
         collisions_recorded,
+        initial_sync_collisions,
     } = phase_local_uploads(ctx, &remote_paths, &remote_items_by_path).await?;
     decisions.extend(local_decisions);
     conflicts_detected += collisions_recorded;
+
+    // RP1-F17: upgrade Download decisions into ConflictDetected when the
+    // local scan saw a file at the same path. Attach the captured local
+    // side to the FileEntry so `phase_resolve_conflicts` can record both
+    // observations in the Conflict row.
+    conflicts_detected +=
+        apply_initial_sync_collisions(ctx, &mut decisions, initial_sync_collisions).await?;
 
     // Phase 3c: resolve content conflicts (`ConflictDetected`) by inserting a
     // `Conflict` row and parking the FileEntry in `PendingConflict` so the
@@ -322,6 +330,13 @@ struct LocalUploadOutcome {
     decisions: Vec<Decision>,
     local_events_seen: usize,
     collisions_recorded: usize,
+    /// Paths where a local file exists at a path the remote delta also
+    /// produced a Download decision for (RP1-F17 initial-sync collision).
+    /// The caller upgrades each entry's decision to `ConflictDetected` and
+    /// attaches the captured local-side metadata to the persisted
+    /// `FileEntry`. Folders are not collected here — two folders at the
+    /// same path are equivalent, not divergent.
+    initial_sync_collisions: Vec<(RelPath, FileSide)>,
 }
 
 /// Phase 2 + 3b: scan the local root, detect untracked or diverged files, emit
@@ -347,12 +362,23 @@ async fn phase_local_uploads<I: IdGenerator>(
     let mut decisions = Vec::new();
     let mut local_events_seen = 0usize;
     let mut collisions_recorded = 0usize;
+    let mut initial_sync_collisions: Vec<(RelPath, FileSide)> = Vec::new();
 
     for (abs_path, side) in scan.entries {
         let Some(rel_path) = rel_from_abs(&ctx.local_root, &abs_path) else {
             continue;
         };
         if already_decided.contains(&rel_path) {
+            // RP1-F17: a local file at a path the remote phase already
+            // decided to download is an initial-sync collision. Surface it
+            // so the caller can promote the Download to ConflictDetected
+            // and attach the local side to the FileEntry created by F10
+            // during the delta phase. Folders are silently shared.
+            if let Some(remote_item) = remote_items_by_path.get(&rel_path)
+                && !remote_item.is_folder()
+            {
+                initial_sync_collisions.push((rel_path, side));
+            }
             continue;
         }
         local_events_seen += 1;
@@ -411,7 +437,43 @@ async fn phase_local_uploads<I: IdGenerator>(
         decisions,
         local_events_seen,
         collisions_recorded,
+        initial_sync_collisions,
     })
+}
+
+/// RP1-F17: promote Download decisions into `ConflictDetected` for paths the
+/// local scan observed, and persist the local side onto the `FileEntry`. Each
+/// upgrade increments the cycle's conflict count.
+async fn apply_initial_sync_collisions<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    decisions: &mut [Decision],
+    collisions: Vec<(RelPath, FileSide)>,
+) -> Result<usize, EngineError> {
+    let mut upgraded = 0usize;
+    for (rel, local_side) in collisions {
+        if let Some(decision) = decisions
+            .iter_mut()
+            .find(|d| d.relative_path == rel && matches!(d.kind, DecisionKind::Download))
+        {
+            decision.kind = DecisionKind::ConflictDetected;
+            upgraded += 1;
+        }
+        let now = ctx.clock.now();
+        if let Some(mut entry) = ctx
+            .state
+            .file_entry_get(&ctx.pair_id, &rel)
+            .await
+            .map_err(|e| EngineError::Port(e.to_string()))?
+        {
+            entry.local = Some(local_side);
+            entry.updated_at = now;
+            ctx.state
+                .file_entry_upsert(&entry)
+                .await
+                .map_err(|e| EngineError::Port(e.to_string()))?;
+        }
+    }
+    Ok(upgraded)
 }
 
 /// RP1-F4: resolve `ConflictDetected` decisions inline by inserting a
