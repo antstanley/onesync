@@ -91,6 +91,7 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
         mut conflicts_detected,
         remote_items_seen,
         delta_token,
+        collision_renames,
         remote_items_by_path,
     } = phase_delta_reconcile(ctx).await?;
 
@@ -143,8 +144,9 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     // engine stops re-emitting decisions for the same path. RP1-F4.
     phase_resolve_conflicts(ctx, &mut decisions).await?;
 
-    // Phase 4: plan.
-    let ops = plan(decisions, run_id, now, ctx.ids);
+    // Phase 4: plan + conflict ops (RP1-F14 follow-on).
+    let mut ops = plan(decisions, run_id, now, ctx.ids);
+    ops.extend(build_remote_rename_ops(ctx, run_id, now, collision_renames));
 
     // Phase 5: execute.
     let exec = phase_execute(ctx, ops).await?;
@@ -208,6 +210,11 @@ struct DeltaReconcileOutcome {
     conflicts_detected: usize,
     remote_items_seen: usize,
     delta_token: Option<DeltaCursor>,
+    /// RP1-F14 follow-on: rename targets for remote case-collision losers.
+    /// Each tuple is `(current path, remote item id, new leaf name)`. The
+    /// caller (`run_cycle`) builds `RemoteRename` `FileOp`s from these after
+    /// it has the `SyncRunId` in hand.
+    collision_renames: Vec<(RelPath, String, String)>,
     /// Map of remote paths (live, non-tombstoned only) to their `RemoteItem`. Used by
     /// the local-upload phase for case-collision detection — we need the remote `FileSide`
     /// to record a faithful `Conflict` row.
@@ -235,33 +242,15 @@ async fn phase_delta_reconcile<I: IdGenerator>(
     // previously upsert two distinct FileEntries and emit two Download
     // decisions; on APFS the second download then overwrites the first,
     // silently losing one of the remote files. Pick the byte-wise smallest
-    // path as canonical and drop the others — they're emitted as audit
-    // events so operators can surface the colliding pair and resolve it on
-    // the remote side. Symmetric local-side handling lives in
-    // `phase_local_uploads::find_case_collision`.
+    // path as canonical and drop the others.
+    //
+    // RP1-F14 follow-on: for each dropped path, also build a rename target
+    // (using `case_collision_rename_target` to derive the disambiguated
+    // leaf) so the caller can emit a remote-side rename op. Both files then
+    // end up on remote with distinct names; the canonical's Download runs
+    // unchanged and a subsequent cycle picks up the renamed loser.
     let collisions = detect_remote_case_collisions(&delta_page.items);
-    for (dropped, canonical) in &collisions {
-        let evt = AuditEvent {
-            id: ctx.ids.new_id::<AuditTag>(),
-            ts: ctx.clock.now(),
-            level: AuditLevel::Warn,
-            kind: "remote.case_collision.dropped".to_owned(),
-            pair_id: Some(ctx.pair_id),
-            payload: {
-                let mut m = serde_json::Map::new();
-                m.insert(
-                    "dropped".to_owned(),
-                    serde_json::Value::String(dropped.as_str().to_owned()),
-                );
-                m.insert(
-                    "canonical".to_owned(),
-                    serde_json::Value::String(canonical.as_str().to_owned()),
-                );
-                m
-            },
-        };
-        ctx.audit.emit(evt);
-    }
+    let collision_renames = process_remote_case_collisions(ctx, &delta_page.items, &collisions);
 
     for remote_item in &delta_page.items {
         let Some(rel_path) = build_rel_path_from_item(remote_item) else {
@@ -328,6 +317,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
         conflicts_detected,
         remote_items_seen,
         delta_token,
+        collision_renames,
         remote_items_by_path,
     })
 }
@@ -446,6 +436,44 @@ async fn phase_local_uploads<I: IdGenerator>(
         collisions_recorded,
         initial_sync_collisions,
     })
+}
+
+/// RP1-F14 follow-on: build `RemoteRename` `FileOp`s for each detected
+/// case-collision loser. The ops carry `metadata.from_conflict = true` so the
+/// post-op `FileEntry` reconciliation step knows not to clobber the parked
+/// state of any related entries.
+fn build_remote_rename_ops<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    run_id: SyncRunId,
+    now: onesync_protocol::primitives::Timestamp,
+    renames: Vec<(RelPath, String, String)>,
+) -> Vec<FileOp> {
+    renames
+        .into_iter()
+        .map(|(path, item_id, new_name)| {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                "remote_item_id".to_owned(),
+                serde_json::Value::String(item_id),
+            );
+            meta.insert("new_name".to_owned(), serde_json::Value::String(new_name));
+            meta.insert("from_conflict".to_owned(), serde_json::Value::Bool(true));
+            FileOp {
+                id: ctx.ids.new_id(),
+                run_id,
+                pair_id: ctx.pair_id,
+                relative_path: path,
+                kind: FileOpKind::RemoteRename,
+                status: FileOpStatus::Enqueued,
+                attempts: 0,
+                last_error: None,
+                metadata: meta,
+                enqueued_at: now,
+                started_at: None,
+                finished_at: None,
+            }
+        })
+        .collect()
 }
 
 /// RP1-F17: promote Download decisions into `ConflictDetected` for paths the
@@ -791,6 +819,58 @@ async fn skip_for_case_collision<I: IdGenerator>(
     Ok(true)
 }
 
+/// Emit the audit event + build the rename target for every remote case-
+/// collision loser. Returns `(path, item_id, new_leaf_name)` for each
+/// renameable loser; entries whose derived target name fails `RelPath`
+/// validation are skipped (the audit event still records the collision).
+fn process_remote_case_collisions<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    items: &[RemoteItem],
+    collisions: &std::collections::HashMap<RelPath, RelPath>,
+) -> Vec<(RelPath, String, String)> {
+    let mut renames = Vec::new();
+    for (dropped, canonical) in collisions {
+        let evt = AuditEvent {
+            id: ctx.ids.new_id::<AuditTag>(),
+            ts: ctx.clock.now(),
+            level: AuditLevel::Warn,
+            kind: "remote.case_collision.dropped".to_owned(),
+            pair_id: Some(ctx.pair_id),
+            payload: {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "dropped".to_owned(),
+                    serde_json::Value::String(dropped.as_str().to_owned()),
+                );
+                m.insert(
+                    "canonical".to_owned(),
+                    serde_json::Value::String(canonical.as_str().to_owned()),
+                );
+                m
+            },
+        };
+        ctx.audit.emit(evt);
+
+        let target_str = case_collision_rename_target(dropped);
+        let Ok(target_rel) = target_str.parse::<RelPath>() else {
+            continue;
+        };
+        let new_leaf = target_rel
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or(target_rel.as_str())
+            .to_owned();
+        if let Some(item) = items
+            .iter()
+            .find(|i| build_rel_path_from_item(i).is_some_and(|p| &p == dropped))
+        {
+            renames.push((dropped.clone(), item.id.clone(), new_leaf));
+        }
+    }
+    renames
+}
+
 /// Detect remote-side case-collisions in one delta page.
 ///
 /// RP1-F14: returns a map of *dropped* (loser) paths to their *canonical*
@@ -1073,6 +1153,21 @@ async fn update_file_entry_post_op<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
     op: &FileOp,
 ) -> Result<(), EngineError> {
+    // RP1-F4 / F14 / F24 follow-ons: conflict-resolution ops drive
+    // disambiguating renames that don't represent "this path is now clean
+    // at the post-op state of side X" — they move a file to a side-channel
+    // path so the canonical version can survive. Leaving the FileEntry
+    // alone preserves the PendingConflict state (when one was set) so the
+    // operator's manual `conflicts resolve` decides the canonical fate.
+    if op
+        .metadata
+        .get("from_conflict")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Ok(());
+    }
+
     let Some(mut entry) = ctx
         .state
         .file_entry_get(&op.pair_id, &op.relative_path)
