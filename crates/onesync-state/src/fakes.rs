@@ -109,6 +109,23 @@ impl StateStore for InMemoryStore {
             .cloned())
     }
 
+    async fn file_entry_get_ci(
+        &self,
+        pair: &PairId,
+        path: &RelPath,
+    ) -> Result<Option<FileEntry>, StateError> {
+        let target_lower = path.as_str().to_ascii_lowercase();
+        Ok(self
+            .file_entries
+            .lock()
+            .expect("fe lock")
+            .values()
+            .find(|e| {
+                &e.pair_id == pair && e.relative_path.as_str().to_ascii_lowercase() == target_lower
+            })
+            .cloned())
+    }
+
     async fn file_entries_dirty(
         &self,
         pair: &PairId,

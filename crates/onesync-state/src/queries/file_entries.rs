@@ -71,6 +71,37 @@ pub fn get(
     .map_err(|e| StateStoreError::Sqlite(e.to_string()))
 }
 
+/// Fetch a file entry by `(pair_id, relative_path)` using a case-insensitive
+/// match on `relative_path`. RP1-F24.
+///
+/// The `COLLATE NOCASE` clause folds ASCII case only; full Unicode folding
+/// is RP1-F15 follow-on work. Returns the first matching row; if more than
+/// one row case-folds equal (which the schema does not currently prevent
+/// because the unique index is byte-exact), the choice is deterministic by
+/// `SQLite`'s iteration order but is not specified beyond that — callers
+/// should treat a CI hit as a "potential collision" signal, not a
+/// definitive lookup.
+///
+/// # Errors
+/// Returns `StateStoreError::Sqlite` if the SQL call fails or a row can't be decoded.
+pub fn get_ci(
+    conn: &Connection,
+    pair: &PairId,
+    path: &RelPath,
+) -> Result<Option<FileEntry>, StateStoreError> {
+    conn.query_row(
+        "SELECT pair_id, relative_path, kind, sync_state, local_json, remote_json, synced_json, \
+                pending_op_id, updated_at \
+         FROM file_entries \
+         WHERE pair_id = ? AND relative_path = ? COLLATE NOCASE \
+         LIMIT 1",
+        params![pair.to_string(), path.as_str()],
+        row_to_entry,
+    )
+    .optional()
+    .map_err(|e| StateStoreError::Sqlite(e.to_string()))
+}
+
 /// Fetch up to `limit` non-clean entries for `pair`, ordered by `updated_at`.
 ///
 /// # Errors

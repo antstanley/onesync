@@ -126,6 +126,22 @@ impl StateStore for SqliteStore {
         .map_err(|e| StateError::Io(format!("join: {e}")))?
     }
 
+    async fn file_entry_get_ci(
+        &self,
+        pair: &PairId,
+        path: &RelPath,
+    ) -> Result<Option<FileEntry>, StateError> {
+        let pool = self.pool.clone();
+        let pair = *pair;
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(map_err)?;
+            queries::file_entries::get_ci(&conn, &pair, &path).map_err(map_err)
+        })
+        .await
+        .map_err(|e| StateError::Io(format!("join: {e}")))?
+    }
+
     async fn file_entries_dirty(
         &self,
         pair: &PairId,

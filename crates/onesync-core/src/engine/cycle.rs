@@ -279,6 +279,13 @@ async fn phase_delta_reconcile<I: IdGenerator>(
             .await
             .map_err(|e| EngineError::Port(e.to_string()))?;
 
+        if entry.is_none()
+            && remote_item.deleted.is_none()
+            && skip_for_case_collision(ctx, &rel_path).await?
+        {
+            continue;
+        }
+
         let remote_opt = if remote_item.is_deleted() {
             None
         } else {
@@ -738,6 +745,50 @@ fn build_remote_observation(
         pending_op_id: None,
         updated_at: now,
     })
+}
+
+/// RP1-F24: returns `true` if a case-folded `FileEntry` already exists at a
+/// different-case path. Emits a `file_entry.case_collision_detected` audit
+/// event in that case so operators can resolve. Callers skip the delta
+/// item entirely — we don't synthesize a parallel `FileEntry` that APFS would
+/// fold into the same inode, nor download content that would overwrite the
+/// existing local file.
+async fn skip_for_case_collision<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    rel_path: &RelPath,
+) -> Result<bool, EngineError> {
+    let Some(existing) = ctx
+        .state
+        .file_entry_get_ci(&ctx.pair_id, rel_path)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?
+    else {
+        return Ok(false);
+    };
+    if existing.relative_path == *rel_path {
+        return Ok(false);
+    }
+    let evt = AuditEvent {
+        id: ctx.ids.new_id::<AuditTag>(),
+        ts: ctx.clock.now(),
+        level: AuditLevel::Warn,
+        kind: "file_entry.case_collision_detected".to_owned(),
+        pair_id: Some(ctx.pair_id),
+        payload: {
+            let mut m = serde_json::Map::new();
+            m.insert(
+                "delta_path".to_owned(),
+                serde_json::Value::String(rel_path.as_str().to_owned()),
+            );
+            m.insert(
+                "existing_path".to_owned(),
+                serde_json::Value::String(existing.relative_path.as_str().to_owned()),
+            );
+            m
+        },
+    };
+    ctx.audit.emit(evt);
+    Ok(true)
 }
 
 /// Detect remote-side case-collisions in one delta page.

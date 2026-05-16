@@ -51,6 +51,21 @@ pub trait StateStore: Send + Sync {
         pair: &PairId,
         path: &RelPath,
     ) -> Result<Option<FileEntry>, StateError>;
+    /// Fetch one file entry by `(pair_id, case-folded relative_path)`, or
+    /// `None`. RP1-F24: APFS folds `Foo.txt` and `foo.txt` to the same
+    /// inode but the engine stores them under their original byte form; an
+    /// exact-match lookup will miss when a remote rename arrives at a
+    /// different case from what local stored. Callers that need to detect
+    /// such drift use this method.
+    ///
+    /// The fold is ASCII-only here, matching
+    /// `crate::engine::case_collision::case_folds_equal`. Full Unicode
+    /// folding is RP1-F15 territory.
+    async fn file_entry_get_ci(
+        &self,
+        pair: &PairId,
+        path: &RelPath,
+    ) -> Result<Option<FileEntry>, StateError>;
     /// Return up to `limit` dirty entries for a pair, ordered by `updated_at` ascending.
     async fn file_entries_dirty(
         &self,
