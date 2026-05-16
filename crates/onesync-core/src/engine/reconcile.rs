@@ -162,18 +162,38 @@ fn local_equals_remote(local: &FileSide, remote: &RemoteItem) -> bool {
 }
 
 /// Returns `true` if the remote item differs from the synced snapshot.
+///
+/// RP1-F2/F6: when we cannot positively prove equality (no etag evidence, no
+/// zero-byte short-circuit) we conservatively report `true`. The previous
+/// behaviour fell back to size-only comparison which silently absorbed any
+/// same-size remote edit (e.g. trivial text replacements that preserve byte
+/// count). The trade-off is a false-positive download instead of a
+/// false-negative missed change — the latter is data loss; the former is
+/// merely extra bandwidth.
 fn remote_differs_from_synced(remote: &RemoteItem, synced: Option<&FileSide>) -> bool {
     let Some(synced) = synced else {
         // No synced snapshot yet means the remote is "new" to us.
         return true;
     };
-    // Compare by remote ETag (fast) if present; fall back to size.
+    // Strongest signal: matching etag proves equality, mismatching proves
+    // divergence. Either way we can return a definitive answer.
     if let Some(etag) = synced.etag.as_ref()
         && let Some(remote_etag) = remote.e_tag.as_deref()
     {
         return etag.as_str() != remote_etag;
     }
-    synced.size_bytes != remote.size
+    // Sizes differ → definitely divergent.
+    if synced.size_bytes != remote.size {
+        return true;
+    }
+    // Zero-byte file with matching size has no content to disagree about.
+    if synced.size_bytes == 0 {
+        return false;
+    }
+    // Sizes match, non-zero bytes, no etag pair available. The cross-algorithm
+    // hash comparison (BLAKE3 vs SHA-1/QuickXorHash) we don't yet perform is
+    // the only remaining equality signal — without it, assume divergence.
+    true
 }
 
 /// Returns `true` if the local side differs from the synced snapshot.
@@ -417,6 +437,62 @@ mod tests {
             DecisionKind::Conflict { .. } => {}
             other => panic!("expected Conflict, got {other:?}"),
         }
+    }
+
+    /// RP1-F2/F6: when `synced.etag` is `None` (initial cycle, post-clear, or
+    /// any cycle where the prior delta page omitted etag) a same-size remote
+    /// edit was previously invisible. After the fix, absence of etag evidence
+    /// forces a `Download` decision rather than silently treating the remote
+    /// as unchanged.
+    #[test]
+    fn remote_same_size_without_etag_triggers_download() {
+        let p = pair();
+        let rp = path("a.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        // Local matches synced — only the remote side could be divergent.
+        let local_synced = FileSide {
+            kind: FileKind::File,
+            size_bytes: 100,
+            content_hash: Some(h(0xaa)),
+            mtime: ts(100),
+            etag: None,
+            remote_item_id: None,
+        };
+        entry.local = Some(local_synced.clone());
+        entry.synced = Some(local_synced);
+        // Remote has the same size but a fresh etag — sizes alone can't tell
+        // us if the bytes changed, so the engine must download.
+        let mut remote = remote_file("r1", "a.txt", 100);
+        remote.e_tag = Some("v9".to_owned());
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        assert_eq!(
+            d.kind,
+            DecisionKind::Download,
+            "same-size remote item with unknown etag must conservatively download"
+        );
+    }
+
+    /// RP1-F2/F6 sibling: when the remote etag matches the synced etag, the
+    /// engine still proves equality and returns `NoOp` (the fast-path).
+    #[test]
+    fn remote_with_matching_etag_is_noop() {
+        let p = pair();
+        let rp = path("a.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        let local_synced = FileSide {
+            kind: FileKind::File,
+            size_bytes: 100,
+            content_hash: Some(h(0xaa)),
+            mtime: ts(100),
+            etag: Some(onesync_protocol::primitives::ETag::new("v3")),
+            remote_item_id: None,
+        };
+        entry.local = Some(local_synced.clone());
+        entry.synced = Some(local_synced);
+        let mut remote = remote_file("r1", "a.txt", 100);
+        remote.e_tag = Some("v3".to_owned());
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        assert_eq!(d.kind, DecisionKind::NoOp);
     }
 
     #[test]
