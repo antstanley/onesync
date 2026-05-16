@@ -28,6 +28,8 @@ use onesync_protocol::{
     sync_run::SyncRun,
 };
 
+use crate::engine::conflict::pick_winner_and_loser;
+
 use crate::{
     engine::{
         case_collision::{case_collision_rename_target, case_folds_equal},
@@ -124,6 +126,14 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     } = phase_local_uploads(ctx, &remote_paths, &remote_items_by_path).await?;
     decisions.extend(local_decisions);
     conflicts_detected += collisions_recorded;
+
+    // Phase 3c: resolve content conflicts (`ConflictDetected`) by inserting a
+    // `Conflict` row and parking the FileEntry in `PendingConflict` so the
+    // next cycle skips it. The 4-step op-group propagation (rename loser +
+    // upload/download) is deferred; this minimal materialisation already
+    // closes the silent-divergence bug — operators see the conflict and the
+    // engine stops re-emitting decisions for the same path. RP1-F4.
+    phase_resolve_conflicts(ctx, &mut decisions).await?;
 
     // Phase 4: plan.
     let ops = plan(decisions, run_id, now, ctx.ids);
@@ -364,6 +374,129 @@ async fn phase_local_uploads<I: IdGenerator>(
         local_events_seen,
         collisions_recorded,
     })
+}
+
+/// RP1-F4: resolve `ConflictDetected` decisions inline by inserting a
+/// `Conflict` row and parking the corresponding `FileEntry` in
+/// `PendingConflict`. This is the minimal materialisation: the spec's full
+/// 4-step op group (rename loser → propagate rename → propagate winner →
+/// record) is deferred. Subsequent cycles see `sync_state =
+/// PendingConflict` and reconcile returns `NoOp`, so the path no longer
+/// regenerates a fresh `ConflictDetected` every cycle.
+///
+/// The pre-fix engine produced `ConflictDetected` (after RP1-F3) or the
+/// placeholder `Conflict` (before) and the planner silently dropped it —
+/// no Conflict row, no operator signal, no state transition. This phase
+/// closes that silent-divergence path.
+///
+/// `decisions` is drained of every conflict variant: planner-side filtering
+/// (`to_file_op_kind` returns `None` for both `ConflictDetected` and the
+/// post-policy `Conflict`) would also work, but removing them here keeps
+/// the planner's input free of "you can't act on this" decisions.
+async fn phase_resolve_conflicts<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    decisions: &mut Vec<Decision>,
+) -> Result<(), EngineError> {
+    let mut i = 0;
+    while i < decisions.len() {
+        if !decisions[i].kind.is_conflict() {
+            i += 1;
+            continue;
+        }
+        let decision = decisions.remove(i);
+        record_content_conflict(ctx, &decision).await?;
+        // Don't increment i: we removed the i-th element.
+    }
+    Ok(())
+}
+
+/// Record one content conflict: insert a `Conflict` row with winner derived
+/// from mtime, set the entry to `PendingConflict`, emit an audit event. The
+/// loser-rename + propagation steps are deferred (see RP1-F4 commit message).
+async fn record_content_conflict<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    decision: &Decision,
+) -> Result<(), EngineError> {
+    let now = ctx.clock.now();
+    let Some(mut entry) = ctx
+        .state
+        .file_entry_get(&ctx.pair_id, &decision.relative_path)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?
+    else {
+        // FileEntry vanished concurrently. Skip; the next cycle will pick up
+        // the new state.
+        return Ok(());
+    };
+
+    let (Some(local_side), Some(remote_side)) = (entry.local.clone(), entry.remote.clone()) else {
+        // A conflict without both sides represented should not happen — the
+        // reconcile code emits `ConflictDetected` only from
+        // `reconcile_both`. Defensive: skip rather than panic.
+        return Ok(());
+    };
+
+    let outcome = pick_winner_and_loser(
+        local_side.mtime,
+        remote_side.mtime,
+        &decision.relative_path,
+        &ctx.host_name,
+        now,
+        0,
+    )
+    .map_err(|e| EngineError::Port(format!("conflict loser path invalid: {e}")))?;
+
+    let conflict = Conflict {
+        id: ctx.ids.new_id::<ConflictTag>(),
+        pair_id: ctx.pair_id,
+        relative_path: decision.relative_path.clone(),
+        winner: outcome.winner,
+        loser_relative_path: outcome.loser_path,
+        local_side,
+        remote_side,
+        detected_at: now,
+        resolved_at: None,
+        resolution: None,
+        note: None,
+    };
+    ctx.state
+        .conflict_insert(&conflict)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
+
+    entry.sync_state = FileSyncState::PendingConflict;
+    entry.updated_at = now;
+    ctx.state
+        .file_entry_upsert(&entry)
+        .await
+        .map_err(|e| EngineError::Port(e.to_string()))?;
+
+    let evt = AuditEvent {
+        id: ctx.ids.new_id::<AuditTag>(),
+        ts: now,
+        level: AuditLevel::Warn,
+        kind: "conflict.detected".to_owned(),
+        pair_id: Some(ctx.pair_id),
+        payload: {
+            let mut m = serde_json::Map::new();
+            m.insert(
+                "path".to_owned(),
+                serde_json::Value::String(decision.relative_path.as_str().to_owned()),
+            );
+            m.insert(
+                "winner".to_owned(),
+                serde_json::to_value(conflict.winner).unwrap_or(serde_json::Value::Null),
+            );
+            m.insert(
+                "loser_path".to_owned(),
+                serde_json::Value::String(conflict.loser_relative_path.as_str().to_owned()),
+            );
+            m
+        },
+    };
+    ctx.audit.emit(evt);
+
+    Ok(())
 }
 
 /// Return the remote path that case-folds equal to `local` but differs in byte form, or

@@ -119,4 +119,32 @@ async fn conflict_when_local_and_remote_both_diverge_from_synced() {
         "expected exactly one Conflict decision, got summary={summary:?}"
     );
     assert_eq!(summary.remote_items_seen, 1);
+
+    // RP1-F4: the engine must materialise the conflict into a persisted
+    // `Conflict` row and park the entry in `PendingConflict` so subsequent
+    // cycles stop re-emitting the same decision.
+    let unresolved = state.conflicts_unresolved(&pair_id).await.unwrap();
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "expected one persisted Conflict row, got {}",
+        unresolved.len()
+    );
+    let conflict = &unresolved[0];
+    assert_eq!(conflict.relative_path.as_str(), "hello.txt");
+    assert!(
+        conflict.resolution.is_none(),
+        "Conflict row must remain unresolved until follow-on op-group lands"
+    );
+
+    let entry_after = state
+        .file_entry_get(&pair_id, &"hello.txt".parse().unwrap())
+        .await
+        .unwrap()
+        .expect("FileEntry must persist post-conflict");
+    assert_eq!(
+        entry_after.sync_state,
+        FileSyncState::PendingConflict,
+        "FileEntry must transition to PendingConflict to short-circuit further cycles"
+    );
 }
