@@ -27,6 +27,14 @@ pub enum ExecError {
         /// The op kind that is unimplemented.
         kind: FileOpKind,
     },
+    /// RP1-F22: op metadata is missing a required key or holds an
+    /// unexpected shape. An invariant violation, not a transient adapter
+    /// failure — never retried.
+    #[error("invalid op: {reason}")]
+    InvalidOp {
+        /// Human-readable description of the missing or malformed metadata.
+        reason: String,
+    },
 }
 
 /// Whether an [`ExecError`] warrants a retry.
@@ -38,8 +46,24 @@ pub const fn is_retriable(err: &ExecError) -> bool {
             e,
             GraphError::Throttled { .. } | GraphError::Transient(_) | GraphError::Network { .. }
         ),
-        ExecError::NotImplemented { .. } => false,
+        ExecError::NotImplemented { .. } | ExecError::InvalidOp { .. } => false,
     }
+}
+
+/// RP1-F22: read a required string-valued metadata key from a [`FileOp`].
+/// Missing or non-string values surface as [`ExecError::InvalidOp`] — bad
+/// metadata is an engine invariant violation, not an adapter-level
+/// transient that retrying would help.
+fn require_meta_str<'a>(op: &'a FileOp, key: &str) -> Result<&'a str, ExecError> {
+    op.metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ExecError::InvalidOp {
+            reason: format!(
+                "op {} (kind={:?}) missing string metadata.{key}",
+                op.id, op.kind
+            ),
+        })
 }
 
 /// Execute a single file operation.
@@ -96,11 +120,16 @@ async fn execute_download(
     local: &dyn LocalFs,
     remote: &dyn RemoteDrive,
 ) -> Result<FileOpStatus, ExecError> {
-    // The remote item id is stored in the op metadata under "remote_item_id".
+    // RP1-F22 partial: ideally this would `require_meta_str(op,
+    // "remote_item_id")?` to fail invariant violations cleanly. The
+    // planner currently does not populate metadata for ops it emits
+    // (only conflict-resolution ops set it). Keeping the lenient
+    // fallback here until planner-side metadata population lands; until
+    // then the adapter's NotFound serves as the failure signal.
     let remote_id_str = op
         .metadata
         .get("remote_item_id")
-        .and_then(|v| v.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let remote_id = onesync_protocol::remote::RemoteItemId(remote_id_str.to_owned());
 
@@ -122,18 +151,15 @@ async fn execute_upload(
     let abs = join_path(local_root, op.relative_path.as_str())?;
     let contents = local.read(&abs).await?.0;
 
+    // RP1-F22 partial: ideally this would `require_meta_str(op,
+    // "parent_remote_id")?` — see the matching note on `execute_download`.
     let parent_id_str = op
         .metadata
         .get("parent_remote_id")
-        .and_then(|v| v.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let parent_id = onesync_protocol::remote::RemoteItemId(parent_id_str.to_owned());
-    let name = op
-        .relative_path
-        .as_str()
-        .rsplit('/')
-        .next()
-        .unwrap_or(op.relative_path.as_str());
+    let name = leaf_name(op.relative_path.as_str());
 
     // LINT: GRAPH_SMALL_UPLOAD_MAX_BYTES is a u64 compared to usize — safe on all platforms.
     #[allow(clippy::cast_possible_truncation)]
@@ -155,11 +181,7 @@ async fn execute_remote_mkdir(
     op: &FileOp,
     remote: &dyn RemoteDrive,
 ) -> Result<FileOpStatus, ExecError> {
-    let parent_id_str = op
-        .metadata
-        .get("parent_remote_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let parent_id_str = require_meta_str(op, "parent_remote_id")?;
     let parent = onesync_protocol::remote::RemoteItemId(parent_id_str.to_owned());
     let name = leaf_name(op.relative_path.as_str());
     remote.mkdir(&parent, name).await?;
@@ -170,11 +192,7 @@ async fn execute_remote_delete(
     op: &FileOp,
     remote: &dyn RemoteDrive,
 ) -> Result<FileOpStatus, ExecError> {
-    let item_id_str = op
-        .metadata
-        .get("remote_item_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let item_id_str = require_meta_str(op, "remote_item_id")?;
     let item = onesync_protocol::remote::RemoteItemId(item_id_str.to_owned());
     match remote.delete(&item).await {
         Ok(()) | Err(crate::ports::GraphError::NotFound) => Ok(FileOpStatus::Success),
@@ -187,15 +205,7 @@ async fn execute_local_rename(
     local_root: &AbsPath,
     local: &dyn LocalFs,
 ) -> Result<FileOpStatus, ExecError> {
-    let new_path_str = op
-        .metadata
-        .get("new_path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            ExecError::Local(LocalFsError::InvalidPath {
-                reason: "LocalRename op missing metadata.new_path".to_owned(),
-            })
-        })?;
+    let new_path_str = require_meta_str(op, "new_path")?;
     let from = join_path(local_root, op.relative_path.as_str())?;
     let to = join_path(local_root, new_path_str)?;
     local.rename(&from, &to).await?;
@@ -206,11 +216,7 @@ async fn execute_remote_rename(
     op: &FileOp,
     remote: &dyn RemoteDrive,
 ) -> Result<FileOpStatus, ExecError> {
-    let item_id_str = op
-        .metadata
-        .get("remote_item_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let item_id_str = require_meta_str(op, "remote_item_id")?;
     let item = onesync_protocol::remote::RemoteItemId(item_id_str.to_owned());
     // The remote rename API takes the new *leaf* name, not the full path.
     // Prefer an explicit `new_name` metadata key; fall back to the leaf of
@@ -220,9 +226,12 @@ async fn execute_remote_rename(
     } else if let Some(path) = op.metadata.get("new_path").and_then(|v| v.as_str()) {
         leaf_name(path).to_owned()
     } else {
-        return Err(ExecError::Local(LocalFsError::InvalidPath {
-            reason: "RemoteRename op missing metadata.new_name and metadata.new_path".to_owned(),
-        }));
+        return Err(ExecError::InvalidOp {
+            reason: format!(
+                "RemoteRename op {} missing metadata.new_name and metadata.new_path",
+                op.id
+            ),
+        });
     };
     remote.rename(&item, &new_name).await?;
     Ok(FileOpStatus::Success)

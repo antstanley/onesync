@@ -14,7 +14,6 @@
 )]
 
 use onesync_core::engine::executor::execute;
-use onesync_core::ports::LocalFsError;
 use onesync_fs_local::fakes::InMemoryLocalFs;
 use onesync_graph::fakes::FakeRemoteDrive;
 use onesync_protocol::{
@@ -135,10 +134,10 @@ async fn remote_rename_changes_name() {
 }
 
 /// Missing rename metadata is an invariant violation, not a port-level
-/// transient — surface it as `Local(InvalidPath)` so the cycle marks the op
-/// `Failed` cleanly rather than retrying.
+/// transient — surface it as `ExecError::InvalidOp` so the cycle marks the
+/// op `Failed` cleanly rather than retrying. (RP1-F22.)
 #[tokio::test]
-async fn local_rename_without_new_path_fails_with_invalid_path() {
+async fn local_rename_without_new_path_fails_with_invalid_op() {
     let remote = FakeRemoteDrive::new();
     let local = InMemoryLocalFs::new();
     let local_root: AbsPath = "/tmp/rp1-f7".parse().unwrap();
@@ -149,12 +148,11 @@ async fn local_rename_without_new_path_fails_with_invalid_path() {
     let err = execute(&op, &local_root, &local, &remote)
         .await
         .expect_err("must error, not silently succeed");
-    let local_err = match err {
-        onesync_core::engine::executor::ExecError::Local(e) => e,
-        other => panic!("expected Local(InvalidPath), got {other:?}"),
-    };
     assert!(
-        matches!(local_err, LocalFsError::InvalidPath { .. }),
-        "expected InvalidPath, got {local_err:?}"
+        matches!(
+            err,
+            onesync_core::engine::executor::ExecError::InvalidOp { .. }
+        ),
+        "expected ExecError::InvalidOp, got {err:?}"
     );
 }

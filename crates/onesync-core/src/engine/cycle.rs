@@ -1071,14 +1071,15 @@ fn remote_side_from_item(
     }
 }
 
-fn synthetic_remote_side() -> FileSide {
+const fn synthetic_remote_side() -> FileSide {
+    // RP1-F27: use chrono's static UNIX_EPOCH constant rather than
+    // `from_timestamp(0, 0).unwrap_or_default()` — the unwrap_or_default was
+    // dead code (epoch is always valid) and obscured the intent.
     FileSide {
         kind: FileKind::File,
         size_bytes: 0,
         content_hash: None,
-        mtime: onesync_protocol::primitives::Timestamp::from_datetime(
-            chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
-        ),
+        mtime: onesync_protocol::primitives::Timestamp::from_datetime(chrono::DateTime::UNIX_EPOCH),
         etag: None,
         remote_item_id: None,
     }
