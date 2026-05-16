@@ -102,8 +102,19 @@ fn reconcile_both(entry: &FileEntry, remote: &RemoteItem) -> DecisionKind {
             }
         }
 
-        // Both changed → conflict.
+        // Both changed → either content-equal (no-op, promote both to synced
+        // on next persistence) or a genuine conflict.
+        //
+        // RP1-F1: spec `03-sync-engine.md` table line 140-147 splits the
+        // (true,true) row into the case where the divergent sides agree with
+        // each other (treat as NoOp; equivalent to "both sides converged")
+        // and the case where they don't (Conflict).
         (true, true) => {
+            if let Some(local) = local_side
+                && local_equals_remote(local, remote)
+            {
+                return DecisionKind::NoOp;
+            }
             // The caller resolves the conflict with pick_winner_and_loser; here we
             // just signal that one exists. The loser_path is filled by the planner.
             DecisionKind::Conflict {
@@ -112,6 +123,42 @@ fn reconcile_both(entry: &FileEntry, remote: &RemoteItem) -> DecisionKind {
             }
         }
     }
+}
+
+/// Whether a local [`FileSide`] is provably equal in content to a
+/// [`RemoteItem`].
+///
+/// Strict: returns `true` only when we can prove equality, never on absence of
+/// evidence. The cases we can prove with the metadata both sides expose:
+///
+/// - Both are directories.
+/// - Both are zero-byte files (no content to disagree about).
+/// - File sizes match AND the local-side `etag` equals the remote `e_tag`.
+///
+/// Hash comparison across local (BLAKE3) and remote (SHA-1 / `QuickXorHash`)
+/// requires algorithm conversion we don't perform here — those cases fall
+/// through and are surfaced as a `Conflict` so no data is silently dropped.
+fn local_equals_remote(local: &FileSide, remote: &RemoteItem) -> bool {
+    let local_is_folder = local.kind == FileKind::Directory;
+    if local_is_folder != remote.is_folder() {
+        return false;
+    }
+    if local_is_folder {
+        return true;
+    }
+    if local.size_bytes != remote.size {
+        return false;
+    }
+    if local.size_bytes == 0 {
+        return true;
+    }
+    if let Some(local_etag) = local.etag.as_ref()
+        && let Some(remote_etag) = remote.e_tag.as_deref()
+        && local_etag.as_str() == remote_etag
+    {
+        return true;
+    }
+    false
 }
 
 /// Returns `true` if the remote item differs from the synced snapshot.
@@ -266,6 +313,109 @@ mod tests {
         match d.kind {
             DecisionKind::Conflict { .. } => {}
             other => panic!("expected Conflict for initial-sync collision, got {other:?}"),
+        }
+    }
+
+    /// Helper: a non-empty content hash (`FileSide::identifies_same_content_as`
+    /// debug-asserts that non-directory sides carry a hash).
+    fn h(byte: u8) -> onesync_protocol::primitives::ContentHash {
+        let hex: String = std::iter::repeat_n(format!("{byte:02x}"), 32).collect();
+        hex.parse().unwrap()
+    }
+
+    /// RP1-F1: when both sides diverged from `synced` but agree with each
+    /// other (here, both truncated to zero bytes), the engine emits `NoOp`
+    /// rather than a spurious `Conflict`.
+    #[test]
+    fn both_diverged_but_zero_byte_equal_is_noop() {
+        let p = pair();
+        let rp = path("a.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        entry.local = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 0,
+            content_hash: Some(h(0x00)),
+            mtime: ts(200),
+            etag: None,
+            remote_item_id: None,
+        });
+        entry.synced = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 42,
+            content_hash: Some(h(0x11)),
+            mtime: ts(100),
+            etag: Some(onesync_protocol::primitives::ETag::new("v0")),
+            remote_item_id: None,
+        });
+        let remote = remote_file("r1", "a.txt", 0);
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        assert_eq!(
+            d.kind,
+            DecisionKind::NoOp,
+            "both sides truncated to zero must reconcile as NoOp"
+        );
+    }
+
+    /// RP1-F1 sibling: divergent sides with matching etag also reconcile as
+    /// `NoOp` (the only "positive evidence of equality" we have when sizes are
+    /// non-zero and content hashes don't align across algorithms).
+    #[test]
+    fn both_diverged_with_matching_etag_is_noop() {
+        let p = pair();
+        let rp = path("a.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        entry.local = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 200,
+            content_hash: Some(h(0xaa)),
+            mtime: ts(200),
+            etag: Some(onesync_protocol::primitives::ETag::new("v2")),
+            remote_item_id: None,
+        });
+        entry.synced = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 100,
+            content_hash: Some(h(0xbb)),
+            mtime: ts(100),
+            etag: Some(onesync_protocol::primitives::ETag::new("v0")),
+            remote_item_id: None,
+        });
+        let mut remote = remote_file("r1", "a.txt", 200);
+        remote.e_tag = Some("v2".to_owned());
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        assert_eq!(d.kind, DecisionKind::NoOp);
+    }
+
+    /// Negative control: when neither size match nor etag match holds, the
+    /// engine still reports `Conflict` — F1's strict equality preserves the
+    /// "no silent data drop" guarantee.
+    #[test]
+    fn both_diverged_without_evidence_remains_conflict() {
+        let p = pair();
+        let rp = path("a.txt");
+        let mut entry = blank_entry(p, rp.clone());
+        entry.local = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 200,
+            content_hash: Some(h(0xaa)),
+            mtime: ts(200),
+            etag: None,
+            remote_item_id: None,
+        });
+        entry.synced = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 100,
+            content_hash: Some(h(0xbb)),
+            mtime: ts(100),
+            etag: Some(onesync_protocol::primitives::ETag::new("v0")),
+            remote_item_id: None,
+        });
+        let mut remote = remote_file("r1", "a.txt", 200);
+        remote.e_tag = Some("v9".to_owned());
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        match d.kind {
+            DecisionKind::Conflict { .. } => {}
+            other => panic!("expected Conflict, got {other:?}"),
         }
     }
 
