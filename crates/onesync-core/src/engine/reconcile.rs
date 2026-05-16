@@ -177,6 +177,14 @@ fn remote_differs_from_synced(remote: &RemoteItem, synced: Option<&FileSide>) ->
         // No synced snapshot yet means the remote is "new" to us.
         return true;
     };
+    // RP1-F30: spec `03-sync-engine.md` line 149 defines equality as
+    // `(kind, size_bytes, content_hash)`. A path that flipped from File to
+    // Directory (or vice versa) is divergent even when etag/size happen to
+    // line up. `is_folder()` is the only kind signal we have remote-side.
+    let synced_is_folder = synced.kind == FileKind::Directory;
+    if synced_is_folder != remote.is_folder() {
+        return true;
+    }
     // Strongest signal: matching etag proves equality, mismatching proves
     // divergence. Either way we can return a definitive answer.
     if let Some(etag) = synced.etag.as_ref()
@@ -497,6 +505,38 @@ mod tests {
         remote.e_tag = Some("v3".to_owned());
         let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
         assert_eq!(d.kind, DecisionKind::NoOp);
+    }
+
+    /// RP1-F30: a path that synced as a File but now appears as a Directory
+    /// (or vice versa) is divergent — even when size/etag happen to line up.
+    /// Isolate the kind check by using a zero-byte file vs a folder (both
+    /// have `size = 0`, so the existing size and zero-byte short-circuits
+    /// don't fire).
+    #[test]
+    fn kind_flip_file_to_directory_is_remote_divergence() {
+        let p = pair();
+        let rp = path("kind");
+        let mut entry = blank_entry(p, rp.clone());
+        // FileSide::identifies_same_content_as debug-asserts non-directory
+        // sides carry a hash; supply one so local-vs-synced equality
+        // returns false (no local change), isolating the remote kind flip.
+        entry.synced = Some(FileSide {
+            kind: FileKind::File,
+            size_bytes: 0,
+            content_hash: Some(h(0xaa)),
+            mtime: ts(100),
+            etag: None,
+            remote_item_id: None,
+        });
+        entry.local = entry.synced.clone();
+        // Remote returns a Directory at the same path — same size (0) and
+        // no etag, but the kind has flipped.
+        let remote = remote_folder("r1", "kind");
+        let d = reconcile_one(p, rp, Some(&entry), Some(&remote));
+        // local matches synced (no local change), remote diverges (kind
+        // flipped File→Directory) → LocalMkdir per the reconcile table
+        // ((false, true) with folder => LocalMkdir).
+        assert_eq!(d.kind, DecisionKind::LocalMkdir);
     }
 
     #[test]
