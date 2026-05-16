@@ -97,13 +97,29 @@ pub async fn fetch_delta_page(
     })
 }
 
-fn extract_token_param(url: &str) -> Option<&str> {
-    url.split_once('?').map(|(_, q)| q).and_then(|q| {
-        q.split('&').find_map(|kv| {
-            kv.split_once('=')
-                .and_then(|(k, v)| if k == "token" { Some(v) } else { None })
-        })
-    })
+/// RP2-F8: extract the delta token from a Graph `@odata.deltaLink` URL.
+///
+/// Uses `url::Url::parse` + `query_pairs()` so the returned value is
+/// URL-decoded (a token containing `%3D` is restored to `=` before we
+/// persist it; without this, passing it back as `?token=…` round-trips
+/// through Graph as a double-encoded value and the server returns
+/// `resyncRequired`).
+///
+/// Accepts both the canonical `token=` parameter and the legacy
+/// `$deltaToken=` spelling Graph occasionally emits.
+///
+/// Returns `None` only when neither the URL nor the parameter parses —
+/// the caller (`delta_page`) treats `None` as "no cursor available",
+/// causing the next cycle to do a full resync. With the looser parser
+/// this should be rare in practice.
+fn extract_token_param(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    for (key, value) in parsed.query_pairs() {
+        if key == "token" || key == "$deltaToken" {
+            return Some(value.into_owned());
+        }
+    }
+    None
 }
 
 fn new_request_id() -> String {
