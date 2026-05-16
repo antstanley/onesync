@@ -136,16 +136,18 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     conflicts_detected +=
         apply_initial_sync_collisions(ctx, &mut decisions, initial_sync_collisions).await?;
 
-    // Phase 3c: resolve content conflicts (`ConflictDetected`) by inserting a
-    // `Conflict` row and parking the FileEntry in `PendingConflict` so the
-    // next cycle skips it. The 4-step op-group propagation (rename loser +
-    // upload/download) is deferred; this minimal materialisation already
-    // closes the silent-divergence bug — operators see the conflict and the
-    // engine stops re-emitting decisions for the same path. RP1-F4.
-    phase_resolve_conflicts(ctx, &mut decisions).await?;
+    // Phase 3c: resolve content conflicts (`ConflictDetected`) by inserting
+    // a `Conflict` row and parking the FileEntry in `PendingConflict`. For
+    // winner=Remote conflicts (RP1-F4 follow-on) also emit the rename +
+    // download op pair so the loser is preserved and the winner content
+    // lands at the original path. winner=Local stays Pending pending the
+    // upload-side machinery (parent_remote_id lookup).
+    let mut conflict_ops: Vec<FileOp> = Vec::new();
+    phase_resolve_conflicts(ctx, &mut decisions, run_id, &mut conflict_ops).await?;
 
-    // Phase 4: plan + conflict ops (RP1-F14 follow-on).
+    // Phase 4: plan + conflict ops (RP1-F4 + F14 follow-ons).
     let mut ops = plan(decisions, run_id, now, ctx.ids);
+    ops.extend(conflict_ops);
     ops.extend(build_remote_rename_ops(ctx, run_id, now, collision_renames));
 
     // Phase 5: execute.
@@ -531,6 +533,8 @@ async fn apply_initial_sync_collisions<I: IdGenerator>(
 async fn phase_resolve_conflicts<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
     decisions: &mut Vec<Decision>,
+    run_id: SyncRunId,
+    conflict_ops: &mut Vec<FileOp>,
 ) -> Result<(), EngineError> {
     let mut i = 0;
     while i < decisions.len() {
@@ -539,18 +543,26 @@ async fn phase_resolve_conflicts<I: IdGenerator>(
             continue;
         }
         let decision = decisions.remove(i);
-        record_content_conflict(ctx, &decision).await?;
+        record_content_conflict(ctx, &decision, run_id, conflict_ops).await?;
         // Don't increment i: we removed the i-th element.
     }
     Ok(())
 }
 
 /// Record one content conflict: insert a `Conflict` row with winner derived
-/// from mtime, set the entry to `PendingConflict`, emit an audit event. The
-/// loser-rename + propagation steps are deferred (see RP1-F4 commit message).
+/// from mtime, set the entry to `PendingConflict`, emit an audit event. For
+/// the winner=`Remote` case (RP1-F4 follow-on) also emits a `LocalRename` +
+/// `Download` op pair so the loser is preserved at `loser_path` locally and
+/// the winner's content overwrites the original. winner=`Local` cases stay
+/// at `PendingConflict` for operator-driven resolution; emitting
+/// `RemoteRename` + `Upload` from the engine would require
+/// `parent_remote_id` lookup logic (the parent path's `FileEntry`) that is
+/// not yet in place.
 async fn record_content_conflict<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
     decision: &Decision,
+    run_id: SyncRunId,
+    conflict_ops: &mut Vec<FileOp>,
 ) -> Result<(), EngineError> {
     let now = ctx.clock.now();
     let Some(mut entry) = ctx
@@ -631,7 +643,76 @@ async fn record_content_conflict<I: IdGenerator>(
     };
     ctx.audit.emit(evt);
 
+    // RP1-F4 follow-on: for winner=Remote, emit the spec's step 1 (rename
+    // loser on its own side) and step 3 (propagate winner to loser side at
+    // the original path). Step 2 (propagate the rename to the other side)
+    // happens organically on the next cycle's local scan.
+    if conflict.winner == ConflictSide::Remote {
+        push_remote_winner_conflict_ops(ctx, &conflict, run_id, conflict_ops);
+    }
+
     Ok(())
+}
+
+/// Build the RP1-F4 follow-on op pair for a `winner=Remote` conflict:
+/// `LocalRename` (loser to disambiguated path) then `Download` (winner content
+/// to the original path). The rename op carries `from_conflict=true` so the
+/// `FileEntry` for the original is not touched by `update_file_entry_post_op`;
+/// the Download op's normal post-op update then transitions the entry to
+/// `Clean` with `synced = entry.remote`.
+fn push_remote_winner_conflict_ops<I: IdGenerator>(
+    ctx: &CycleCtx<'_, I>,
+    conflict: &Conflict,
+    run_id: SyncRunId,
+    conflict_ops: &mut Vec<FileOp>,
+) {
+    let now = ctx.clock.now();
+
+    let mut rename_meta = serde_json::Map::new();
+    rename_meta.insert(
+        "new_path".to_owned(),
+        serde_json::Value::String(conflict.loser_relative_path.as_str().to_owned()),
+    );
+    rename_meta.insert("from_conflict".to_owned(), serde_json::Value::Bool(true));
+    conflict_ops.push(FileOp {
+        id: ctx.ids.new_id(),
+        run_id,
+        pair_id: ctx.pair_id,
+        relative_path: conflict.relative_path.clone(),
+        kind: FileOpKind::LocalRename,
+        status: FileOpStatus::Enqueued,
+        attempts: 0,
+        last_error: None,
+        metadata: rename_meta,
+        enqueued_at: now,
+        started_at: None,
+        finished_at: None,
+    });
+
+    let Some(remote_item_id) = conflict.remote_side.remote_item_id.as_ref() else {
+        // Remote side has no driveItem id — can't issue a Download. Leave
+        // the FileEntry parked at PendingConflict; operator resolves.
+        return;
+    };
+    let mut download_meta = serde_json::Map::new();
+    download_meta.insert(
+        "remote_item_id".to_owned(),
+        serde_json::Value::String(remote_item_id.as_str().to_owned()),
+    );
+    conflict_ops.push(FileOp {
+        id: ctx.ids.new_id(),
+        run_id,
+        pair_id: ctx.pair_id,
+        relative_path: conflict.relative_path.clone(),
+        kind: FileOpKind::Download,
+        status: FileOpStatus::Enqueued,
+        attempts: 0,
+        last_error: None,
+        metadata: download_meta,
+        enqueued_at: now,
+        started_at: None,
+        finished_at: None,
+    });
 }
 
 /// Return the remote path that case-folds equal to `local` but differs in byte form, or

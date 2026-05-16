@@ -103,15 +103,18 @@ async fn initial_sync_collision_records_conflict_and_parks_entry() {
         .expect("Conflict row for hello.txt must be persisted by phase_resolve_conflicts");
     assert!(collision.resolution.is_none());
 
-    // The FileEntry parked in PendingConflict so the next cycle won't
-    // re-emit the same decision.
+    // After RP1-F4 follow-on, a winner=Remote conflict auto-resolves: the
+    // engine emits LocalRename + Download, the Download succeeds against
+    // the in-memory fakes, and the FileEntry transitions to Clean.
+    //
+    // Both sides have mtime = clock.now() (tie → Remote wins).
     let rel: onesync_protocol::path::RelPath = "hello.txt".parse().unwrap();
     let entry = state
         .file_entry_get(&pair_id, &rel)
         .await
         .unwrap()
         .expect("FileEntry must persist");
-    assert_eq!(entry.sync_state, FileSyncState::PendingConflict);
+    assert_eq!(entry.sync_state, FileSyncState::Clean);
     assert!(
         entry.local.is_some(),
         "RP1-F17 must attach the local side observed by the scan"

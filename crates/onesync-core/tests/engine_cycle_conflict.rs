@@ -121,8 +121,7 @@ async fn conflict_when_local_and_remote_both_diverge_from_synced() {
     assert_eq!(summary.remote_items_seen, 1);
 
     // RP1-F4: the engine must materialise the conflict into a persisted
-    // `Conflict` row and park the entry in `PendingConflict` so subsequent
-    // cycles stop re-emitting the same decision.
+    // `Conflict` row.
     let unresolved = state.conflicts_unresolved(&pair_id).await.unwrap();
     assert_eq!(
         unresolved.len(),
@@ -132,11 +131,15 @@ async fn conflict_when_local_and_remote_both_diverge_from_synced() {
     );
     let conflict = &unresolved[0];
     assert_eq!(conflict.relative_path.as_str(), "hello.txt");
-    assert!(
-        conflict.resolution.is_none(),
-        "Conflict row must remain unresolved until follow-on op-group lands"
-    );
 
+    // RP1-F4 follow-on (winner=Remote auto-resolution): the cycle emits the
+    // LocalRename + Download op pair. Both run against the in-memory fakes
+    // and the FileEntry transitions to Clean post-Download (synced reflects
+    // the remote winner). The Conflict row stays `resolution=None` until a
+    // later commit wires the Auto-resolution marker.
+    //
+    // Both `local_snap` and `remote_snap` have `mtime = ts(1)` (tie), and
+    // ties resolve to Remote, so winner=Remote here.
     let entry_after = state
         .file_entry_get(&pair_id, &"hello.txt".parse().unwrap())
         .await
@@ -144,7 +147,7 @@ async fn conflict_when_local_and_remote_both_diverge_from_synced() {
         .expect("FileEntry must persist post-conflict");
     assert_eq!(
         entry_after.sync_state,
-        FileSyncState::PendingConflict,
-        "FileEntry must transition to PendingConflict to short-circuit further cycles"
+        FileSyncState::Clean,
+        "winner=Remote conflict auto-resolves the FileEntry to Clean"
     );
 }
