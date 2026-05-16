@@ -129,18 +129,30 @@ pub async fn run_cycle<I: IdGenerator>(ctx: &CycleCtx<'_, I>) -> Result<CycleSum
     let ops = plan(decisions, run_id, now, ctx.ids);
 
     // Phase 5: execute.
-    let ops_applied = phase_execute(ctx, ops).await?;
+    let exec = phase_execute(ctx, ops).await?;
+    let ops_applied = exec.applied;
 
-    // Phase 6: record.
+    // Phase 6: record. RP1-F19: classify the run outcome from the actual
+    // op-result counts rather than unconditionally claiming Success.
     let finished_at = ctx.clock.now();
+    let outcome = classify_outcome(exec.applied, exec.failed);
+    let outcome_detail = if exec.failed > 0 {
+        Some(format!(
+            "{} op(s) failed of {} attempted",
+            exec.failed,
+            exec.applied + exec.failed
+        ))
+    } else {
+        None
+    };
     // LINT: ops_applied ≤ MAX_QUEUE_DEPTH_PER_PAIR (4096) so truncation is safe.
     #[allow(clippy::cast_possible_truncation)]
     let run = SyncRun {
         id: run_id,
         pair_id: ctx.pair_id,
         trigger: ctx.trigger,
-        outcome: Some(RunOutcome::Success),
-        outcome_detail: None,
+        outcome: Some(outcome),
+        outcome_detail,
         local_ops: ops_applied as u32,
         remote_ops: 0,
         bytes_uploaded: 0,
@@ -587,12 +599,41 @@ fn local_diverges_from_synced(side: &FileSide, synced: Option<&FileSide>) -> boo
     }
 }
 
-/// Phase 5: execute each op with retries; returns the count of ops that succeeded.
+/// Op-execution result counters produced by [`phase_execute`].
+struct ExecuteCounts {
+    /// Number of ops that finished with `FileOpStatus::Success`.
+    applied: usize,
+    /// Number of ops that finished with `FileOpStatus::Failed`
+    /// (retry-exhausted or non-retriable error).
+    failed: usize,
+}
+
+/// Classify a sync run's outcome from execute-phase counters.
+///
+/// Spec `docs/spec/03-sync-engine.md` line 38-39 names a `PartialFailure`
+/// outcome distinct from `Success`. RP1-F19: the engine previously hard-coded
+/// `Success` regardless of per-op result, which masked recurring upload
+/// failures and made `SyncRun.outcome` an unreliable signal.
+const fn classify_outcome(applied: usize, failed: usize) -> RunOutcome {
+    if failed == 0 {
+        RunOutcome::Success
+    } else if applied == 0 {
+        // All planned ops failed — still a `PartialFailure` per the enum
+        // (we lack a dedicated `Failure` variant) but the detail string and
+        // counts will distinguish it for operators.
+        RunOutcome::PartialFailure
+    } else {
+        RunOutcome::PartialFailure
+    }
+}
+
+/// Phase 5: execute each op with retries; returns success / failure counts.
 async fn phase_execute<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
     ops: Vec<FileOp>,
-) -> Result<usize, EngineError> {
-    let mut ops_applied = 0usize;
+) -> Result<ExecuteCounts, EngineError> {
+    let mut applied = 0usize;
+    let mut failed = 0usize;
 
     for mut op in ops {
         ctx.state
@@ -608,6 +649,7 @@ async fn phase_execute<I: IdGenerator>(
                         .op_update_status(&op.id, FileOpStatus::Failed)
                         .await
                         .map_err(|e| EngineError::Port(e.to_string()))?;
+                    failed += 1;
                     break;
                 }
                 RetryDecision::Immediate | RetryDecision::Backoff { .. } => {}
@@ -625,8 +667,10 @@ async fn phase_execute<I: IdGenerator>(
                         // and transition sync_state to Clean per spec
                         // `03-sync-engine.md` lines 230-231.
                         update_file_entry_post_op(ctx, &op).await?;
+                        applied += 1;
+                    } else {
+                        failed += 1;
                     }
-                    ops_applied += 1;
                     break;
                 }
                 Err(e) if is_retriable(&e) => {
@@ -645,13 +689,14 @@ async fn phase_execute<I: IdGenerator>(
                         op.relative_path.as_str(),
                         &e.to_string(),
                     ));
+                    failed += 1;
                     break;
                 }
             }
         }
     }
 
-    Ok(ops_applied)
+    Ok(ExecuteCounts { applied, failed })
 }
 
 /// Reflect a successful op onto the persisted `FileEntry`:
@@ -810,5 +855,26 @@ mod tests {
         let local = file_side(10, None, 100);
         let synced = file_side(10, None, 100);
         assert!(local_diverges_from_synced(&local, Some(&synced)));
+    }
+
+    // RP1-F19: outcome classification.
+    #[test]
+    fn rp1_f19_zero_zero_is_success() {
+        assert_eq!(classify_outcome(0, 0), RunOutcome::Success);
+    }
+
+    #[test]
+    fn rp1_f19_some_applied_zero_failed_is_success() {
+        assert_eq!(classify_outcome(5, 0), RunOutcome::Success);
+    }
+
+    #[test]
+    fn rp1_f19_mixed_is_partial_failure() {
+        assert_eq!(classify_outcome(3, 2), RunOutcome::PartialFailure);
+    }
+
+    #[test]
+    fn rp1_f19_all_failed_is_partial_failure() {
+        assert_eq!(classify_outcome(0, 3), RunOutcome::PartialFailure);
     }
 }
