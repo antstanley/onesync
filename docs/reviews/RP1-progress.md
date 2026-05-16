@@ -1,18 +1,18 @@
 # RP1 (sync engine) — remediation progress
 
 **Last update:** 2026-05-16
-**Head:** main at `bb51a526`
+**Head:** main at `ddd670f6`
 **Plan:** `docs/plans/2026-05-15-remediation.md`
 **Source review:** `docs/reviews/2026-05-15-sync-engine.md`
 
 ## Status
 
-**All 14 RP1 BUGs closed.** Full-workspace verification gates clean:
+**All 14 RP1 BUGs closed.** All three follow-ons (F4 op-group, F14 auto-rename, F24 auto-rename) landed. Full-workspace verification gates clean:
 
 - `cargo fmt --all -- --check` — PASS
 - `cargo run -p xtask -- check-schema` — PASS
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS
-- `cargo nextest run --workspace` — 347 passed, 5 skipped (baseline +35 new tests, zero regressions)
+- `cargo nextest run --workspace` — 348 passed, 5 skipped (baseline +36 new tests, zero regressions)
 
 RP1 CONCERNs (13) and NITs (2) remain.
 
@@ -21,18 +21,18 @@ RP1 CONCERNs (13) and NITs (2) remain.
 | F1 | Reconcile both-converged NoOp branch | ✅ done | `8c7e26c3` |
 | F2 | Remote etag-fallback to size silently absorbs same-size edit | ✅ done (paired with F6) | `3548693d` |
 | F3 | Conflict winner/loser placeholder values | ✅ done | `f281a737` |
-| F4 | Planner drops Conflict — silent divergence | ⚠ minimal: Conflict row + PendingConflict transition; full 4-step op group (rename loser + propagate rename + propagate winner) deferred | `3af4de43` |
+| F4 | Planner drops Conflict — silent divergence | ✅ minimal `3af4de43`; winner=Remote auto-resolve (rename + download) `ddd670f6`. winner=Local still parks at PendingConflict pending `parent_remote_id` lookup. |
 | F5 | Local divergence uses mtime; ignores content | ✅ done | `a7aa91c1` |
 | F6 | Remote-divergence size-only fallback (sibling of F2) | ✅ done with F2 | `3548693d` |
 | F7 | Executor only 4 of 8 op kinds | ✅ done | `1717b251` |
 | F10 | Cycle never persists new delta cursor / FileEntry.remote | ✅ done | `c3d1cdb1` |
 | F11 | FileEntry.synced not updated after a successful op | ✅ done | `dae3519d` |
 | F13 | Conflict loser filename missing detection timestamp | ✅ done | `8c9ab3b4` |
-| F14 | Case-collision symmetric (remote-only collision pair) | ✅ done (detection + audit; auto-rename deferred) | `0f7ef3c7` |
+| F14 | Case-collision symmetric (remote-only collision pair) | ✅ detection + audit `0f7ef3c7`; auto-rename of losers `725d32e2`. |
 | F16 | Delta `name` treated as full path | ✅ done | `04f03db8` |
 | F17 | Initial-sync 5-bullet rule not implemented | ✅ done | `7e05c6d5` |
 | F19 | SyncRun.outcome always Success | ✅ done | `601a4518` |
-| F24 | `file_entry_get` is byte-exact; misses case-insensitive collisions | ✅ done (port extension + detection + audit; auto-rename deferred) | `bb51a526` |
+| F24 | `file_entry_get` is byte-exact; misses case-insensitive collisions | ✅ port extension + detection + audit `bb51a526`; auto-rename of colliding delta items `eff51259`. |
 
 ## What's structurally fixed across all 14 BUGs
 
@@ -45,13 +45,15 @@ RP1 CONCERNs (13) and NITs (2) remain.
 - **Remote case-collisions detected.** Two delta items that case-fold equal pick a deterministic canonical and drop losers with an audit event.
 - **Case-insensitive `FileEntry` lookup exists at the port.** A byte-exact miss followed by a CI hit emits an audit event and skips the delta item — no silent overwrite via APFS-folded download.
 
-## Deferred follow-ups (still part of RP1 logical scope; not BUGs anymore)
+## Follow-on status
 
-- **F4 full op group.** The minimal F4 records the conflict and parks the entry. The spec's 4-step propagation (rename loser → propagate rename → propagate winner → record) is not yet emitted. Operators currently must resolve manually.
-- **F14 auto-rename.** Remote case-collisions are detected and audited; the loser is not yet renamed remotely.
-- **F24 auto-resolution.** Case-collision lookup hits emit an audit and skip; they don't promote to a Conflict row or auto-rename.
+All three deferred follow-ons from the BUG-tier checkpoint are now landed:
 
-All three follow-ups are extensions of working code paths — none of them require new structural decisions.
+- **F4 follow-on (winner=Remote).** `record_content_conflict` emits a `LocalRename` + `Download` pair: the loser is moved to a disambiguated path locally and the remote winner content lands at the original path. The FileEntry auto-resolves to `Clean`. winner=Local stays at `PendingConflict` — auto-resolving that direction requires a parent-remote-id lookup (`Upload`'s `parent_remote_id` metadata is currently empty in the planner) which is its own work item.
+- **F14 auto-rename.** `process_remote_case_collisions` builds rename targets via `case_collision_rename_target` for each loser; `build_remote_rename_ops` emits `RemoteRename` ops appended after the planner's output. Both colliding files end up with distinct names on remote.
+- **F24 auto-rename.** `skip_for_case_collision` now also pushes a rename target for the colliding delta item. The existing local FileEntry survives at its original case; the remote arrival is renamed.
+
+All three rely on a shared `metadata.from_conflict = true` flag on the emitted ops, and `update_file_entry_post_op` short-circuits when it sees that flag — keeps the related FileEntry untouched (so PendingConflict / Clean transitions stay coherent with the surrounding logic).
 
 ## What's next in RP1 — 13 CONCERNs + 2 NITs
 
