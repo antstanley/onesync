@@ -36,7 +36,7 @@ use crate::{
         executor::{execute, is_retriable},
         observability::{cycle_finished, cycle_started, op_failed},
         planner::plan,
-        reconcile::reconcile_one,
+        reconcile::{is_action_blocking, reconcile_one},
         retry::{RetryDecision, retry_decision},
         types::{CycleSummary, Decision, DecisionKind, EngineError},
     },
@@ -396,9 +396,9 @@ async fn phase_local_uploads<I: IdGenerator>(
             .await
             .map_err(|e| EngineError::Port(e.to_string()))?;
 
-        let needs_upload = entry.as_ref().is_none_or(|e| match e.sync_state {
-            FileSyncState::InFlight | FileSyncState::PendingConflict => false,
-            _ => local_diverges_from_synced(&side, e.synced.as_ref()),
+        let needs_upload = entry.as_ref().is_none_or(|e| {
+            !is_action_blocking(e.sync_state)
+                && local_diverges_from_synced(&side, e.synced.as_ref())
         });
         if !needs_upload {
             continue;

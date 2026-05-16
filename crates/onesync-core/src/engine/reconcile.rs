@@ -61,15 +61,8 @@ fn reconcile_kind(entry: Option<&FileEntry>, remote: Option<&RemoteItem>) -> Dec
 }
 
 fn reconcile_both(entry: &FileEntry, remote: &RemoteItem) -> DecisionKind {
-    // If there's already an in-flight op or conflict, do nothing this cycle.
-    match entry.sync_state {
-        FileSyncState::InFlight | FileSyncState::PendingConflict => {
-            return DecisionKind::NoOp;
-        }
-        FileSyncState::Clean
-        | FileSyncState::Dirty
-        | FileSyncState::PendingUpload
-        | FileSyncState::PendingDownload => {}
+    if is_action_blocking(entry.sync_state) {
+        return DecisionKind::NoOp;
     }
 
     let local_side: Option<&FileSide> = entry.local.as_ref();
@@ -161,6 +154,22 @@ fn local_equals_remote(local: &FileSide, remote: &RemoteItem) -> bool {
         return true;
     }
     false
+}
+
+/// RP1-F28: returns `true` when an existing `FileEntry`'s `sync_state`
+/// blocks further engine action on the path this cycle.
+///
+/// Both `reconcile` and `phase_local_uploads` need this check; centralising
+/// it here keeps the rule in one place. `InFlight` parks the path while an
+/// op is mid-execute against the adapter; `PendingConflict` parks it while
+/// an unresolved Conflict row is awaiting operator (or future-cycle)
+/// action. All other states represent candidates the engine may act on.
+#[must_use]
+pub const fn is_action_blocking(state: FileSyncState) -> bool {
+    matches!(
+        state,
+        FileSyncState::InFlight | FileSyncState::PendingConflict
+    )
 }
 
 /// Returns `true` if the remote item differs from the synced snapshot.
