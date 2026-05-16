@@ -124,4 +124,21 @@ async fn remote_rename_at_different_case_does_not_clobber_local_entry() {
         .expect("original FileEntry must survive");
     assert_eq!(entry_old.sync_state, FileSyncState::Clean);
     assert!(entry_old.synced.is_some());
+
+    // RP1-F24 follow-on: the colliding delta item must have been auto-
+    // renamed on remote with a `(case-collision-XXXXXXX).<ext>` suffix.
+    // The canonical local case is `Foo.txt`; the remote arrived as
+    // `foo.txt`; the engine renames the remote item to disambiguate.
+    let (items, _) = remote.delta_all_sync();
+    let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+    assert!(
+        !names.contains(&"foo.txt"),
+        "remote `foo.txt` should have been renamed to a case-collision name, got names = {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.contains("(case-collision-") && n.contains(".txt")),
+        "expected a `(case-collision-XXXXXXX).txt` entry on remote, got names = {names:?}"
+    );
 }

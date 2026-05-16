@@ -250,7 +250,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
     // end up on remote with distinct names; the canonical's Download runs
     // unchanged and a subsequent cycle picks up the renamed loser.
     let collisions = detect_remote_case_collisions(&delta_page.items);
-    let collision_renames = process_remote_case_collisions(ctx, &delta_page.items, &collisions);
+    let mut collision_renames = process_remote_case_collisions(ctx, &delta_page.items, &collisions);
 
     for remote_item in &delta_page.items {
         let Some(rel_path) = build_rel_path_from_item(remote_item) else {
@@ -270,7 +270,7 @@ async fn phase_delta_reconcile<I: IdGenerator>(
 
         if entry.is_none()
             && remote_item.deleted.is_none()
-            && skip_for_case_collision(ctx, &rel_path).await?
+            && skip_for_case_collision(ctx, &rel_path, remote_item, &mut collision_renames).await?
         {
             continue;
         }
@@ -775,15 +775,17 @@ fn build_remote_observation(
     })
 }
 
-/// RP1-F24: returns `true` if a case-folded `FileEntry` already exists at a
-/// different-case path. Emits a `file_entry.case_collision_detected` audit
-/// event in that case so operators can resolve. Callers skip the delta
-/// item entirely — we don't synthesize a parallel `FileEntry` that APFS would
-/// fold into the same inode, nor download content that would overwrite the
-/// existing local file.
+/// RP1-F24 + follow-on: returns `true` if a case-folded `FileEntry` already
+/// exists at a different-case path. Emits a `file_entry.case_collision_detected`
+/// audit event and, if the disambiguated rename target parses, appends a
+/// `(path, item_id, new_leaf)` record to `collision_renames` so the caller
+/// emits a `RemoteRename` op for the loser. The original local `FileEntry`
+/// is untouched.
 async fn skip_for_case_collision<I: IdGenerator>(
     ctx: &CycleCtx<'_, I>,
     rel_path: &RelPath,
+    remote_item: &RemoteItem,
+    collision_renames: &mut Vec<(RelPath, String, String)>,
 ) -> Result<bool, EngineError> {
     let Some(existing) = ctx
         .state
@@ -816,6 +818,20 @@ async fn skip_for_case_collision<I: IdGenerator>(
         },
     };
     ctx.audit.emit(evt);
+
+    // RP1-F24 follow-on: emit a rename target for the colliding delta item
+    // so the canonical local FileEntry survives at its original case and the
+    // remote item ends up under a disambiguated name.
+    let target_str = case_collision_rename_target(rel_path);
+    if let Ok(target_rel) = target_str.parse::<RelPath>() {
+        let new_leaf = target_rel
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or(target_rel.as_str())
+            .to_owned();
+        collision_renames.push((rel_path.clone(), remote_item.id.clone(), new_leaf));
+    }
     Ok(true)
 }
 
