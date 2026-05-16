@@ -1195,7 +1195,7 @@ async fn phase_execute<I: IdGenerator>(
             // `retry_decision` returns `Immediate` for the first attempt and
             // `Backoff { delay_ms }` for subsequent ones; we sleep the
             // computed delay before each non-first attempt.
-            match retry_decision(attempt, pseudo_jitter(attempt)) {
+            match retry_decision(attempt, random_jitter(attempt)) {
                 RetryDecision::Exhausted => {
                     if let Err(e) = ctx
                         .state
@@ -1363,11 +1363,31 @@ fn emit_op_state_failure<I: IdGenerator>(
 
 /// Deterministic pseudo-jitter for use without a random source.
 ///
-/// Returns 0.25 for odd attempts, 0.0 for even — purely for retry scheduling in
-/// deterministic contexts (tests, and as a fallback). Production callers should
-/// supply true random jitter.
+/// Returns 0.25 for odd attempts, 0.0 for even — only used as a fallback if
+/// `getrandom` fails or in unit tests of [`retry_decision`] that need
+/// reproducible inputs. Production callers in [`phase_execute`] use
+/// [`random_jitter`] (RP1-F20).
 const fn pseudo_jitter(attempt: u32) -> f64 {
     if attempt % 2 == 1 { 0.25 } else { 0.0 }
+}
+
+/// RP1-F20: cryptographically-strong random jitter in [0.0, 1.0). Replaces
+/// the deterministic `pseudo_jitter` for production calls in
+/// [`phase_execute`] so two pairs hitting the same backoff schedule don't
+/// retry in lock-step (thundering-herd). Falls back to `pseudo_jitter`-
+/// equivalent zero on `getrandom` failure — rare in practice on macOS.
+fn random_jitter(attempt: u32) -> f64 {
+    let mut buf = [0u8; 8];
+    if getrandom::getrandom(&mut buf).is_err() {
+        return pseudo_jitter(attempt);
+    }
+    let n = u64::from_le_bytes(buf);
+    // LINT: u64 → f64 loses precision in the low bits but that's the whole
+    // point of jitter; clamp keeps the result in the documented contract
+    // range regardless of float rounding.
+    #[allow(clippy::cast_precision_loss)]
+    let r = (n as f64) / (u64::MAX as f64);
+    r.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
